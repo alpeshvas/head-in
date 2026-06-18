@@ -84,6 +84,10 @@ Leave the Setup checkpoint list EMPTY to enter ad-hoc mode: during recording, ty
 4. Cosmetics: live-trace scorer label; freeze segment label when off-route; HTML meters in match-route. (Fixed 2026-06-11: segment card/rings now floored at last reached checkpoint via `displayBin`, so they can no longer contradict the ratcheted timeline.)
 5. More negative recordings (off-route walk in a different room, standing pass) + pocket-carry passes; re-fit params as traces accumulate.
 
+## Known limitations
+
+- **No start/direction guard — a reverse or mid-route entry false-advances** (observed 2026-06-19, LIS trace `..._live_20260619-031803`). Walking the forward profile backward (C8→C1) still fired C1–C6: the filter initializes at bin 0 and `predictStep` only advances forward, so it marches on step count with P(OFF)≈0 while the magnitude-symmetric emission fails to veto the reversed traversal. Consistent with the directional-route design (forward/reverse are separate profiles) but the filter doesn't *reject* misuse, it silently tracks forward. Research-aligned fix: **entrance/start anchoring** (Phase-3 GPS/entrance init) — don't arm checkpoint firing until the start region is confidently matched. Acceptable for the guided-tour use case (enter at start, walk forward); revisit if free entry matters.
+
 ## Key constraints (unchanged)
 
 End-user runtime is strictly camera-free (ARKit is surveyor-only). Floor detection out of scope v1 (barometer recorded only). Product promise = checkpoint/zone confidence with manual fallback, never a blue dot. Commercial gate: ≥90% correct triggers within ±5 m across ≥3 venues, 3+ iPhone models, hand+pocket.
