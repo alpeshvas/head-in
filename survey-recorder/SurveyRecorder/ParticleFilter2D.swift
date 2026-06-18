@@ -53,6 +53,14 @@ final class ParticleFilter2D {
         normalize()
     }
 
+    init(map: VenueMap2D, heatmapCells: [MagneticHeatmapCell], particles: [Particle2D], seed: UInt64 = 0x5eed) {
+        self.map = map
+        self.heatmapCells = heatmapCells
+        self.rng = SeededRandomNumberGenerator(seed: seed)
+        self.particles = particles
+        normalize()
+    }
+
     func predictStep(gyroDeltaRadians: Double) {
         for i in particles.indices {
             let old = particles[i]
@@ -141,10 +149,7 @@ final class ParticleFilter2D {
     }
 
     private func isWalkable(_ point: MapPoint2D) -> Bool {
-        if map.walkablePolygons.isEmpty {
-            return point.x >= 0 && point.y >= 0 && point.x <= map.widthMeters && point.y <= map.heightMeters
-        }
-        return map.walkablePolygons.contains { Geometry2D.pointInPolygon(point, polygon: $0) }
+        Geometry2D.isWalkable(point, in: map)
     }
 
     private func nearestCell(to point: MapPoint2D) -> MagneticHeatmapCell? {

@@ -13,6 +13,7 @@ final class TwoDSurveyController {
     private(set) var latestMapPoint: MapPoint2D?
     private(set) var latestRoomName: String?
     private(set) var sampleCount = 0
+    private(set) var rejectedOutsideWalkableCount = 0
     private(set) var heatmapCells: [MagneticHeatmapCell]
     private(set) var alignmentPairs: [ARMapAlignmentPair2D] = []
     private(set) var transform: ARMapTransform2D?
@@ -23,7 +24,11 @@ final class TwoDSurveyController {
     @ObservationIgnored private var latestARPoint: ARPoint2D?
     @ObservationIgnored private var samples: [SurveySample2D] = []
     @ObservationIgnored private var updateCounter = 0
+    @ObservationIgnored private var lastHeatmapBuildT = -Double.infinity
     @ObservationIgnored private var writer: TwoDSurveyWriter?
+
+    private let heatmapRefreshSamples = 12
+    private let heatmapRefreshSeconds = 0.5
 
     init(map: VenueMap2D, existingCells: [MagneticHeatmapCell] = []) {
         self.map = map
@@ -50,6 +55,7 @@ final class TwoDSurveyController {
         latestMapPoint = nil
         latestRoomName = nil
         sampleCount = 0
+        rejectedOutsideWalkableCount = 0
         samples.removeAll(keepingCapacity: true)
         // Reset+add: every fresh survey starts from an empty heatmap rather than
         // building on the previously saved cells.
@@ -57,6 +63,8 @@ final class TwoDSurveyController {
         alignmentPairs.removeAll(keepingCapacity: true)
         transform = nil
         latestARPoint = nil
+        updateCounter = 0
+        lastHeatmapBuildT = -Double.infinity
         writer = try? TwoDSurveyWriter(map: map)
 
         arRecorder.onPose = { [weak self] pose in
@@ -84,6 +92,7 @@ final class TwoDSurveyController {
 
     func stop() {
         guard isRunning else { return }
+        rebuildHeatmap(forceTimestamp: ProcessInfo.processInfo.systemUptime)
         isRunning = false
         arRecorder.stop()
         sensorRecorder.stop()
@@ -139,7 +148,15 @@ final class TwoDSurveyController {
         ) else { return }
 
         let mapPoint = transform.mapPoint(for: ar)
-        guard Geometry2D.roomId(containing: mapPoint, in: map) != nil || map.walkablePolygons.isEmpty else { return }
+        latestMapPoint = mapPoint
+        latestRoomName = roomName(containing: mapPoint)
+        guard Geometry2D.isWalkable(mapPoint, in: map) else {
+            rejectedOutsideWalkableCount += 1
+            if rejectedOutsideWalkableCount.isMultiple(of: 25) {
+                statusText = "Outside walkable area · adjust map/alignment"
+            }
+            return
+        }
 
         let sample = SurveySample2D(
             timestamp: motion.timestamp,
@@ -151,14 +168,20 @@ final class TwoDSurveyController {
         samples.append(sample)
         writer?.writeSample(sample)
         sampleCount = samples.count
-        latestMapPoint = mapPoint
-        latestRoomName = roomName(containing: mapPoint)
+        if sampleCount == 1 || statusText.hasPrefix("Outside walkable area") {
+            statusText = "Surveying · heatmap forming"
+        }
 
         updateCounter += 1
-        if updateCounter >= 25 {
-            updateCounter = 0
-            heatmapCells = accumulator.buildCells(from: samples, in: map)
+        if updateCounter >= heatmapRefreshSamples || motion.timestamp - lastHeatmapBuildT >= heatmapRefreshSeconds {
+            rebuildHeatmap(forceTimestamp: motion.timestamp)
         }
+    }
+
+    private func rebuildHeatmap(forceTimestamp timestamp: TimeInterval) {
+        heatmapCells = accumulator.buildCells(from: samples, in: map)
+        updateCounter = 0
+        lastHeatmapBuildT = timestamp
     }
 
     private func roomName(containing point: MapPoint2D) -> String? {

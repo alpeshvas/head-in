@@ -25,7 +25,11 @@ targets:
     sources:
       - path: SurveyRecorder/RouteBeliefFilter.swift
       - path: SurveyRecorder/RouteProfile.swift
+      - path: SurveyRecorder/ParticleFilter2D.swift
+      - path: SurveyRecorder/TwoDMapModels.swift
+      - path: SurveyRecorder/TwoDSurveyModels.swift
       - path: Tests/FilterParityTests.swift
+      - path: Tests/ParticleFilter2DTests.swift
       - path: Tests/Fixtures
         buildPhase: resources
     settings:

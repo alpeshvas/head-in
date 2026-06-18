@@ -186,7 +186,12 @@ struct MapHeatmapView: View {
                     HStack(spacing: 14) {
                         stat("Tracking", controller.trackingStatus)
                         stat("Samples", "\(controller.sampleCount)")
+                        stat("Cells", "\(controller.heatmapCells.count)")
                         stat("Room", controller.latestRoomName ?? "-")
+                    }
+                    HStack(spacing: 14) {
+                        stat("Position", controller.latestMapPoint.map { String(format: "%.1f, %.1f", $0.x, $0.y) } ?? "-")
+                        stat("Rejected", "\(controller.rejectedOutsideWalkableCount)")
                     }
 
                     Button {
@@ -459,10 +464,13 @@ struct FloorPlanHeatmapCanvas: View {
     }
 
     private func drawHeatmap(in context: inout GraphicsContext, transform: MapTransform) {
+        drawEmptyWalkableGrid(in: &context, transform: transform)
+
         let maxSamples = max(cells.map(\.sampleCount).max() ?? 1, 1)
         let maxChange = max(cells.map(\.magneticChangeUT).max() ?? 1, 1)
 
         for cell in cells {
+            guard Geometry2D.isWalkable(cell.center, in: map) else { continue }
             let rect = transform.rect(center: cell.center, meters: cell.cellSizeMeters)
             let color: Color
             switch mode {
@@ -477,6 +485,25 @@ struct FloorPlanHeatmapCanvas: View {
             let cellPath = Path(roundedRect: rect, cornerRadius: 2)
             context.fill(cellPath, with: .color(color))
             context.stroke(cellPath, with: .color(.black.opacity(0.25)), lineWidth: 0.5)
+        }
+    }
+
+    private func drawEmptyWalkableGrid(in context: inout GraphicsContext, transform: MapTransform) {
+        let cellSizeMeters = 0.5
+        var y = cellSizeMeters / 2
+        while y <= map.heightMeters {
+            var x = cellSizeMeters / 2
+            while x <= map.widthMeters {
+                let center = MapPoint2D(x: x, y: y)
+                if Geometry2D.isWalkable(center, in: map) {
+                    let rect = transform.rect(center: center, meters: cellSizeMeters)
+                    let path = Path(roundedRect: rect, cornerRadius: 1.5)
+                    context.fill(path, with: .color(.gray.opacity(0.10)))
+                    context.stroke(path, with: .color(.gray.opacity(0.18)), lineWidth: 0.4)
+                }
+                x += cellSizeMeters
+            }
+            y += cellSizeMeters
         }
     }
 

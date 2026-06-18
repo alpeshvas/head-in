@@ -34,10 +34,7 @@ struct HeatmapAccumulator2D {
     }
 
     private func isWalkable(_ point: MapPoint2D, in map: VenueMap2D) -> Bool {
-        if map.walkablePolygons.isEmpty {
-            return point.x >= 0 && point.y >= 0 && point.x <= map.widthMeters && point.y <= map.heightMeters
-        }
-        return map.walkablePolygons.contains { Geometry2D.pointInPolygon(point, polygon: $0) }
+        Geometry2D.isWalkable(point, in: map)
     }
 
     private func estimatedPassCount(_ sortedSamples: [SurveySample2D]) -> Int {

@@ -103,6 +103,13 @@ struct SurveySample2D: Codable, Hashable {
 }
 
 enum Geometry2D {
+    static func isWalkable(_ point: MapPoint2D, in map: VenueMap2D) -> Bool {
+        if map.walkablePolygons.isEmpty {
+            return point.x >= 0 && point.y >= 0 && point.x <= map.widthMeters && point.y <= map.heightMeters
+        }
+        return map.walkablePolygons.contains { pointInPolygon(point, polygon: $0) }
+    }
+
     static func roomId(containing point: MapPoint2D, in map: VenueMap2D) -> String? {
         map.rooms.first { pointInPolygon(point, polygon: $0.polygon) }?.id
     }
@@ -114,8 +121,10 @@ enum Geometry2D {
         for i in polygon.indices {
             let pi = polygon[i]
             let pj = polygon[j]
-            if ((pi.y > point.y) != (pj.y > point.y)) &&
-                (point.x < (pj.x - pi.x) * (point.y - pi.y) / max(pj.y - pi.y, 1e-9) + pi.x) {
+            let dy = pj.y - pi.y
+            if abs(dy) > 1e-9,
+               ((pi.y > point.y) != (pj.y > point.y)),
+               point.x < (pj.x - pi.x) * (point.y - pi.y) / dy + pi.x {
                 inside.toggle()
             }
             j = i

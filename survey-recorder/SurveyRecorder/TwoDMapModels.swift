@@ -261,8 +261,10 @@ enum DemoVenueMap2D {
         for i in polygon.indices {
             let pi = polygon[i]
             let pj = polygon[j]
-            if ((pi.y > point.y) != (pj.y > point.y)) &&
-                (point.x < (pj.x - pi.x) * (point.y - pi.y) / max(pj.y - pi.y, 1e-9) + pi.x) {
+            let dy = pj.y - pi.y
+            if abs(dy) > 1e-9,
+               ((pi.y > point.y) != (pj.y > point.y)),
+               point.x < (pj.x - pi.x) * (point.y - pi.y) / dy + pi.x {
                 inside.toggle()
             }
             j = i
