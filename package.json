@@ -1,0 +1,19 @@
+{
+  "name": "indoor-positioning",
+  "version": "1.0.0",
+  "description": "Phone-only indoor positioning prototype using magnetic fingerprinting and inertial sensor fusion.",
+  "main": "index.js",
+  "scripts": {
+    "analyze": "node analysis/analyze-repeatability.js",
+    "test": "echo \"No tests configured yet\""
+  },
+  "keywords": [
+    "indoor-positioning",
+    "magnetic-fingerprinting",
+    "sensor-fusion",
+    "pdr"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
