@@ -95,12 +95,21 @@ Reference and runtime files:
 - Live app wiring: `survey-recorder/SurveyRecorder/LivePositioningController.swift`
 - Swift parity tests: `survey-recorder/Tests/FilterParityTests.swift`
 
+For a conversational walkthrough of the predict/observe loop and common questions, see [Route Belief Filter Q&A](route-belief-filter-qna.md).
+
 ### State model
 
 All profile segments are concatenated into one global array of route bins. The filter keeps:
 
 - probability for each route bin: “the user may be here on the known route”
 - `pOff`: probability that the route no longer explains the live motion/readings
+
+The core logic is to keep many possible positions alive instead of committing too early. Every update follows the same shape:
+
+1. **Predict** from motion: step events shift probability along the route.
+2. **Observe** from sensors: magnetic windows and turn events reweight candidate bins.
+3. **Normalize**: `sum(belief) + pOff = 1` again.
+4. **Decide**: checkpoint/off-route UI state is derived from the posterior.
 
 ### Predict step
 
@@ -115,6 +124,8 @@ Different users can have shorter or longer strides, so the filter does not move 
 ### Path constraints
 
 “Path constraints” means the filter only considers positions along the surveyed route, not arbitrary indoor x/y coordinates.
+
+The current prototype does **not** store wall polygons or a full walkable floor-plan mesh. It gets a narrower version of map constraints by only allowing on-route probability to move along the surveyed route profile. If live motion/readings stop fitting that route, probability moves into `OFF`.
 
 Concretely:
 
@@ -131,12 +142,29 @@ After steps, the live magnetic magnitude window is resampled per step and compar
 
 The observation model reweights bins whose profile magnetic pattern best explains the live window. Flat windows or uncalibrated magnetometer periods are treated cautiously; motion without magnetic corroboration leaks probability into `OFF`.
 
+Magnetic match strength is data-dependent rather than a fixed boost. The code computes Gaussian log-likelihoods from first-difference residuals and multiplies route bins by the resulting likelihood. Current defaults are `diffSigmaUT = 2.42µT`, `obsIndependenceBins = 8`, and `offLogLikPerPoint = -4.99`, but profiles can override the fitted calibration. With those defaults, a candidate whose residual is about 1 sigma better than another gets roughly `exp(0.5 × 8) ≈ 55×` more likelihood; a very distinctive 2-sigma difference can be orders of magnitude stronger.
+
 ### Turn observations
 
-For hand-carry live runs, gyro rotation is projected onto the gravity axis to detect signed yaw turns. A live turn can:
+Turn detection is used as a sparse landmark/correction signal, not as the primary tracker.
+
+- **Offline:** `analysis/build-profile.js` calls `analysis/turn-events.js` on survey passes. Repeatable turns are stored in profile `turns[]` as `{ bin, deltaDeg, sigmaBins }` landmarks.
+- **Live:** for hand-carry runs, `LivePositioningController` projects gyro rotation onto the gravity axis to detect signed yaw turns. When `LiveTurnDetector` closes a turn region, the app calls `filter.observeTurn(deltaDeg:)`.
+
+A live turn can:
 
 - match a stored profile turn near the current posterior support and re-concentrate belief there
 - fail to match any expected route turn, in which case a U-turn-scale rotation injects probability into `OFF` and temporarily suppresses checkpoint firing
+
+Current turn matching constants:
+
+- same left/right sign as the stored turn
+- angle within `55°`
+- at least `10%` of on-route posterior support near the turn bin
+- matched turn likelihood is approximately `0.05 + exp(-0.5 × d²)` per bin, so the turn center is about `21×` stronger than far-away route bins
+- matched turn multiplies `OFF` by `0.3`
+- unmatched turns of at least `100°` move `50%` of on-route probability to `OFF`
+- unmatched U-turns start `8` reversal-suppression steps where checkpoints cannot fire
 
 Turn evidence is disabled/down-weighted for pocket mode because leg swing distorts turn magnitudes.
 
@@ -152,13 +180,27 @@ It does **not** currently implement global relocalization to an arbitrary far-aw
 
 A checkpoint fires only when all of these are true:
 
-- recent magnetic evidence exists
-- posterior route mass is past the checkpoint decision bin
-- `pOff` is below the off-route threshold
+- recent magnetic evidence exists: `stepsSinceObservation <= 2`
+- enough posterior route mass is past the checkpoint decision bin: `probBeyond(decisionBin) / onRoute > 0.8`
+- `pOff` is below the off-route threshold: `pOff < 0.5`
 - no unresolved reversal is active
-- the condition holds for consecutive updates
+- the condition holds for **2 consecutive updates** as a fixed debounce against one-frame matches
+
+`probBeyond(bin:)` is not itself boolean; it sums route-bin probability at or beyond a checkpoint bin. `meanBin` is the probability-weighted average route position. `beliefStdDev` is the spread of on-route probability in bins and should be read together with `pOff`.
 
 This is intentionally conservative: dead reckoning alone should not silently advance the tour.
+
+### Grid filter vs particle filter / 2D future
+
+The current implementation is a grid Bayes filter rather than a particle filter because the current state is only 1D route position. The app can store exact probability for every route bin, avoid sampling noise, and make checkpoint decisions by summing exact posterior mass.
+
+A particle filter becomes more attractive for a larger continuous state, especially 2D:
+
+```text
+state = x, y, heading, maybe stride length, maybe floor
+```
+
+2D is possible but larger-scope from the current codebase. It would require a floor-plan coordinate system, walkable/non-walkable geometry, dense fingerprints tied to `(x, y)`, heading uncertainty, a 2D prediction model, and more survey coverage. With current route-only data, a 2D filter would likely be less reliable at first because heading errors create sideways drift and the magnetic profile is not a dense 2D map.
 
 ## Product Contract
 

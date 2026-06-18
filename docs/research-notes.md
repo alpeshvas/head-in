@@ -298,22 +298,27 @@ Inputs:
 - checkpoint order
 - previous estimated segment
 
-Process:
+Current prototype process:
 
-- maintain candidate route segments
-- compare recent magnetic windows to stored fingerprints
-- use steps to estimate distance traveled since last anchor
-- use turns to reject impossible segments
-- constrain candidates to walkable paths
-- smooth estimates over time
+- maintain a probability distribution over route-position bins, plus an explicit `OFF` state
+- call `predictStep()` when a step is detected to move probability along the route
+- call `observe(...)` to compare recent magnetic first-difference windows against stored fingerprints
+- call `observeTurn(...)` for hand-carry turn landmarks and unmatched U-turn/off-route evidence
+- constrain on-route belief to the surveyed 1D route profile rather than arbitrary indoor `(x,y)`
+- fire checkpoints only from posterior probability and confidence guards, not dead reckoning alone
 - emit confidence-scored events
 
-Possible algorithm families:
+Implemented algorithm:
 
-- Hidden Markov Model for route-segment state.
-- Particle filter constrained to route geometry.
-- Dynamic Time Warping for matching magnetic sequences.
-- Simpler sliding-window similarity for the first prototype.
+- Discrete-grid Bayes filter / HMM over route-position bins plus one `OFF` state.
+
+Related future algorithm families:
+
+- Particle filter constrained to route geometry, especially if the state expands to 2D `(x,y,heading)`.
+- Dynamic Time Warping or learned sequence matching as richer magnetic observation models.
+- Simpler sliding-window similarity only as a baseline, not the current live matcher.
+
+For current implementation details and thresholds, see [Architecture](architecture.md) and [Route Belief Filter Q&A](route-belief-filter-qna.md).
 
 ## Office-Specific Notes
 
