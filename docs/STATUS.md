@@ -40,7 +40,7 @@ Updated: 2026-06-11 (end of grid-filter validation session)
 
 ## Outstanding (in priority order)
 
-1. **Validate turn anchors live** (clean walk: −159° turn should show "matched" in diagnostics, 3/3 checkpoints; pacing: no false fire). Turn params (`turnUTurnOffLeak` 0.5 etc.) are hand-chosen, not fitted — sweep when more negative traces exist. Missing-turn evidence (walked past bin 350 without turning) not implemented.
+1. **Validate turn anchors live** — clean walk ✅ DONE 2026-06-11 (trace `..._live_20260611-121903.jsonl`: 3/3 fires, −166.5° matched at 12.4 s corroborating Bedroom entry; JS replay structurally agrees within 0.3–0.6 s). **Pacing live test still pending.** Turn params (`turnUTurnOffLeak` 0.5 etc.) are hand-chosen, not fitted — sweep when more negative traces exist. Missing-turn evidence (walked past bin 350 without turning) not implemented.
 2. **JS↔Swift parity test** (shared fixture; THIRD hand-sync just happened (observeTurn + reversal leak) — biggest correctness risk).
 3. ~~Commit the working tree~~ ✅ Done 2026-06-11 (four logical commits: recorder upgrades, analysis tooling, live positioning tab, recordings+docs). Note: `recordings/` and `recordings-new/` hold near-duplicate session sets — consolidate sometime.
 4. Cosmetics: live-trace scorer label; freeze segment label when off-route; HTML meters in match-route. (Fixed 2026-06-11: segment card/rings now floored at last reached checkpoint via `displayBin`, so they can no longer contradict the ratcheted timeline.)
