@@ -4,10 +4,11 @@ Prototype workspace for phone-only indoor positioning using magnetic fingerprint
 
 ## Research First
 
-The most important artifact right now is the research log:
+The most important artifacts right now are:
 
 - [Indoor Positioning Research Notes](docs/research-notes.md)
 - [Architecture Sketch](docs/architecture.md)
+- [Dex GPS vs Indoor Positioning Checkpoint Triggers](docs/dex-gps-vs-indoor-positioning.md)
 
 ## Product Direction
 

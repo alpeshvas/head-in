@@ -12,7 +12,7 @@ The most reliable default path is not a single sensor. It is a constrained fusio
 
 1. Magnetic fingerprinting from the phone magnetometer.
 2. Pedestrian dead reckoning from steps, accelerometer, gyroscope, and device motion.
-3. A venue route graph with wall, turn, and checkpoint constraints. Routes are single-floor in v1.
+3. A venue route graph with turn and checkpoint constraints. A full floor-plan graph can also encode wall/non-walkable constraints; the current prototype uses an ordered 1D route profile rather than polygonal wall geometry. Routes are single-floor in v1.
 4. Confidence scoring and explicit fallback when the signal is ambiguous.
 
 Floor detection (barometer/altimeter fusion, stair/elevator events, multi-floor routes) is out of scope for v1. Barometer samples are still recorded during surveys for future use.
@@ -37,7 +37,17 @@ Wi-Fi RTT/FTM is promising on Android and newer Wi-Fi standards, but it depends 
 
 Recommended as the default.
 
-Use raw and calibrated magnetic samples as spatial fingerprints. Use steps, cadence, accelerometer, gyro turn detection, and device motion to estimate motion between anchors. Restrict all hypotheses to a route graph or walkable floor-plan graph. Use a particle filter, HMM, or simpler route-segment belief model to maintain candidate states.
+Record both raw and calibrated magnetic samples as spatial fingerprints. Use steps, cadence, accelerometer, gyro turn detection, and device motion to estimate motion between anchors. Restrict all hypotheses to a route graph or walkable floor-plan graph. The general algorithm family is probabilistic localization: particle filter, HMM/grid filter, or a simpler route-segment belief model.
+
+Current codebase status:
+
+- Sensor recording: `SensorRecorder` samples Core Motion at 100 Hz. `RecordingController` writes calibrated device-motion magnetic field samples to `dm.mag.x/y/z` with calibration accuracy, and raw magnetometer samples to `mag.x/y/z`.
+- Profile building: `analysis/build-profile.js` prefers calibrated `dm.mag` samples when available and falls back to raw `mag` samples only if needed.
+- Unit: iOS magnetic field values are in microteslas (µT). Magnetic magnitude means `sqrt(x² + y² + z²)`, so it is also in µT.
+- Gradients/deltas: the current matcher uses stride-scale first differences, e.g. "how much did magnetic magnitude change over roughly one step?" This compares `(live[k + lag] - live[k])` against the profile difference at the candidate route position. The difference is in µT; if normalized by physical distance it becomes µT/m.
+- Map/route recording: the prototype does not yet store a full floor-plan or wall polygons. The survey app records route metadata, an ordered checkpoint list, and `anchor` taps. `build-profile.js` turns consecutive anchors into profile `segments[]` with `from`, `to`, magnetic means/stddevs, step statistics, calibration, and optional turn signatures. That profile is the current route map.
+- Runtime algorithm: the app currently uses `RouteBeliefFilter`, a discrete-grid Bayes filter / HMM over concatenated route-position bins plus one explicit `OFF` state. It is not a particle filter. A particle filter would keep many sampled candidate states and reweight them; this code instead stores `belief[]`, a probability for every route bin, plus `pOff`. It is closest to a fine-grained route-segment belief model.
+- Current wall constraint behavior: because no wall geometry is stored, the app does not literally know walls. It prevents impossible movement by allowing probability only along the surveyed route profile; if the live sensor evidence cannot be explained by that route, probability moves into the `OFF` state.
 
 Expected reliability:
 
@@ -50,7 +60,7 @@ Why it is reliable enough:
 - Magnetic field localization is infrastructure-free and low-cost.
 - Indoor magnetic fields are often temporally stable unless the building changes significantly.
 - PDR provides continuity but drifts, so it must be periodically corrected by magnetic and map evidence.
-- Floor plans and route constraints stop impossible wall-crossing and reduce ambiguity.
+- Floor-plan constraints can stop impossible wall-crossing; the current prototype gets a narrower version of this benefit by constraining belief to the surveyed route and using `OFF` when the route no longer explains the sensors.
 
 Primary risks:
 
@@ -64,7 +74,7 @@ Implementation shape:
 
 - Survey each route segment 3-5 times per direction.
 - Store samples by normalized route distance, not only timestamp.
-- Use magnetic magnitude plus gradients/deltas to reduce device orientation and model bias.
+- Use magnetic magnitude (µT) plus stride-scale gradients/deltas (µT change over movement) to reduce device orientation and model bias.
 - Detect turns and pauses; reject candidates inconsistent with route geometry.
 - Keep multiple hypotheses until a checkpoint or distinctive magnetic landmark resolves them.
 - Emit `near_checkpoint`, `progressed_to_segment`, `possibly_off_route`, and `low_confidence`.
@@ -243,9 +253,10 @@ Observations:
 
 Algorithms:
 
-- MVP: sliding-window magnetic sequence similarity plus route graph constraints.
-- Next: HMM over route segments and checkpoint states.
-- Production: particle filter over route-distance states with map constraints and magnetic observation weights.
+- Current prototype: discrete-grid Bayes filter / HMM over route-distance bins, with magnetic first-difference observations, PDR step transitions, turn observations, and an explicit `OFF` state.
+- Simpler MVP alternative: sliding-window magnetic sequence similarity plus route graph constraints.
+- Segment-level alternative: HMM over route segments and checkpoint states.
+- Free-form/map-rich alternative: particle filter over route-distance or floor-plan states with map constraints and magnetic observation weights.
 
 ### Confidence Contract
 
