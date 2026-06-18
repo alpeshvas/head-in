@@ -5,6 +5,8 @@ struct RouteProfile: Decodable {
     let route: ProfileRoute
     let anchors: [RouteAnchor]
     let segments: [RouteSegment]
+    /// Phase-3 turn signature (optional: older profiles predate it).
+    let turns: [RouteTurn]?
 
     var routeLabel: String {
         [route.venueId, route.routeId, route.direction, route.devicePose]
@@ -83,6 +85,14 @@ struct RouteSegment: Decodable, Identifiable {
 
 struct ProfileStatistic: Decodable {
     let median: Double?
+}
+
+/// A turn the route reliably contains: signed heading change (degrees,
+/// counter-clockwise-from-above positive) at a global profile bin.
+struct RouteTurn: Decodable {
+    let bin: Int
+    let deltaDeg: Double
+    let sigmaBins: Double
 }
 
 struct MagneticMagnitudeProfile: Decodable {

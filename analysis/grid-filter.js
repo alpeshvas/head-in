@@ -31,6 +31,7 @@
 const fs = require('fs');
 const path = require('path');
 const { buildArcLength } = require('./ground-truth');
+const { detectTurns } = require('./turn-events');
 
 // sensorSigmaUT and offLogLikPerPoint were fitted with --calibrate against the
 // held-out Plumeria clean pass (hand pose). Re-fit per venue/pose as data grows.
@@ -54,6 +55,21 @@ const PARAMS = {
   // per-point log-likelihood of a live window evaluated at a WRONG position.
   // null -> fall back to the structureless-field OFF model.
   offLogLikPerPoint: -4.86, // must be re-fitted whenever sensorSigmaUT changes
+  // Turn-anchor observation (Phase 3). A detected turn that matches a profile
+  // signature turn (same direction, magnitude within tolerance) concentrates
+  // belief around the signature bin; a large turn matching nothing favors OFF.
+  turnMatchToleranceDeg: 55, // |live delta - signature delta| to count as a match
+  turnLikFloor: 0.05,        // on-route likelihood far from any matching turn
+  turnOffLik: 0.3,           // OFF-state likelihood for a matched turn event
+  turnNegativeMinDeg: 100,   // unmatched turns below this are ignored, not OFF evidence
+  // An unmatched U-turn is a TRANSITION, not an emission: the walker reversed
+  // where the route has no turn, so on-route mass moves into OFF directly
+  // (a likelihood reweight cannot create OFF mass when P(OFF) is ~0), and the
+  // following steps keep leaking because the step kernel still pushes belief
+  // forward while the walker is actually heading back.
+  turnUTurnOffLeak: 0.5,     // on-route mass moved to OFF at the reversal itself
+  turnReversalLeakPerStep: 0.12, // extra per-step leak after an unexplained reversal
+  turnReversalSteps: 8,      // how many steps the reversal leak lasts
 };
 
 // ---------------------------------------------------------------------------
@@ -75,7 +91,12 @@ function parseSession(filePath) {
       const t = Number(obj.t);
       const mag = Math.hypot(Number(obj.mag.x), Number(obj.mag.y), Number(obj.mag.z));
       const ua = obj.ua ? Math.hypot(Number(obj.ua.x), Number(obj.ua.y), Number(obj.ua.z)) : NaN;
-      if (Number.isFinite(t) && Number.isFinite(mag)) dm.push({ t, mag, ua });
+      let yawRate = NaN;
+      if (obj.rot && obj.g) {
+        const gm = Math.hypot(obj.g.x, obj.g.y, obj.g.z) || 1;
+        yawRate = -(obj.rot.x * obj.g.x + obj.rot.y * obj.g.y + obj.rot.z * obj.g.z) / gm;
+      }
+      if (Number.isFinite(t) && Number.isFinite(mag)) dm.push({ t, mag, ua, yawRate });
     } else if (obj.type === 'anchor' && Number.isFinite(Number(obj.t))) {
       anchors.push({ t: Number(obj.t), index: obj.index, name: String(obj.name ?? '') });
     } else if (obj.type === 'anchor_undo') {
@@ -167,7 +188,8 @@ function buildGlobalProfile(profile) {
   const globalMean = mean.reduce((a, b) => a + b, 0) / mean.length;
   const globalVar = mean.reduce((a, b) => a + (b - globalMean) ** 2, 0) / mean.length;
 
-  return { mean, std, segments, anchorBins, bins: mean.length, globalMean, globalVar };
+  const turns = Array.isArray(profile.turns) ? profile.turns : [];
+  return { mean, std, segments, anchorBins, bins: mean.length, globalMean, globalVar, turns };
 }
 
 function segmentOfBin(gp, bin) {
@@ -213,6 +235,7 @@ class RouteGridFilter {
     // Initialize at route start with a little spread.
     for (let i = 0; i < Math.min(8, globalProfile.bins); i++) this.belief[i] = Math.exp(-i / 3);
     this.pOff = 0.0;
+    this.reversalStepsLeft = 0;
     this.normalize();
   }
 
@@ -265,6 +288,18 @@ class RouteGridFilter {
     }
     this.belief = next;
     this.pOff = this.pOff * PARAMS.offStay + leaked;
+    // Steps taken while the heading is unexplained (after an unmatched U-turn)
+    // are not credible route progress.
+    if (this.reversalStepsLeft > 0) {
+      this.reversalStepsLeft--;
+      let mass = 0;
+      for (let i = 0; i < this.belief.length; i++) {
+        const leak = this.belief[i] * PARAMS.turnReversalLeakPerStep;
+        this.belief[i] -= leak;
+        mass += leak;
+      }
+      this.pOff += mass;
+    }
     this.normalize();
   }
 
@@ -354,6 +389,51 @@ class RouteGridFilter {
       // bins with no window (too close to route start) keep prior weight unchanged
     }
     if (Number.isFinite(offLL)) this.pOff *= Math.exp(offLL - maxLL);
+    this.normalize();
+    return true;
+  }
+
+  /**
+   * Turn-anchor observation (Phase 3, UnLoc-style landmark reset). The
+   * likelihood over bins is a floor plus a Gaussian bump at every signature
+   * turn whose direction matches and whose magnitude is within tolerance;
+   * OFF gets a constant (people turn off-route at some rate). A matched turn
+   * therefore snaps belief to the turn's bin; a large turn that matches no
+   * signature turn pushes mass into OFF.
+   */
+  observeTurn(deltaDeg) {
+    const matches = this.gp.turns.filter(
+      (turn) => Math.sign(turn.deltaDeg) === Math.sign(deltaDeg) &&
+        Math.abs(deltaDeg - turn.deltaDeg) <= PARAMS.turnMatchToleranceDeg
+    );
+    if (!matches.length) {
+      // A modest unmatched turn (doorway wiggle, hand adjustment) is
+      // uninformative; an unmatched U-turn-scale rotation is a transition
+      // into OFF plus a sustained leak while the heading stays unexplained.
+      if (Math.abs(deltaDeg) < PARAMS.turnNegativeMinDeg) return false;
+      let moved = 0;
+      for (let i = 0; i < this.belief.length; i++) {
+        const leak = this.belief[i] * PARAMS.turnUTurnOffLeak;
+        this.belief[i] -= leak;
+        moved += leak;
+      }
+      this.pOff += moved;
+      this.reversalStepsLeft = PARAMS.turnReversalSteps;
+      this.normalize();
+      return false;
+    }
+    // Matched turn: emission update. The Gaussian bump only re-concentrates
+    // belief that already has support near the signature bin — a match cannot
+    // teleport belief from elsewhere on the route.
+    for (let i = 0; i < this.belief.length; i++) {
+      let lik = PARAMS.turnLikFloor;
+      for (const turn of matches) {
+        lik += Math.exp(-0.5 * ((i - turn.bin) / turn.sigmaBins) ** 2);
+      }
+      this.belief[i] *= lik;
+    }
+    this.pOff *= PARAMS.turnOffLik;
+    this.reversalStepsLeft = 0; // heading is explained again
     this.normalize();
     return true;
   }
@@ -517,6 +597,10 @@ function replay(profile, session) {
   const events = [];
   for (const t of steps) events.push({ t, kind: 'step' });
   for (let t = t0; t <= tEnd; t += 1.0) events.push({ t, kind: 'tick' });
+  // Turn events fire when the turning region ends — the earliest a live
+  // detector could emit them.
+  const turns = session.dm.some((s) => Number.isFinite(s.yawRate)) ? detectTurns(session.dm) : [];
+  for (const turn of turns) events.push({ t: turn.endT, kind: 'turn', deltaDeg: turn.deltaDeg });
   events.sort((a, b) => a.t - b.t);
 
   const checkpointStates = profile.anchors.slice(1).map((a) => {
@@ -534,6 +618,7 @@ function replay(profile, session) {
   });
 
   const timeline = [];
+  const turnLog = [];
   let lastT = t0;
   let offSince = null;
   let offRouteAt = null;
@@ -550,6 +635,12 @@ function replay(profile, session) {
         stepsSinceObservation++;
         filter.applyUnobservedLeak();
       }
+    } else if (ev.kind === 'turn') {
+      // Live stops at route completion; mirror that so the surveyor's
+      // end-of-recording turn-around is not scored as evidence.
+      if (checkpointStates.every((cp) => cp.firedAt !== null)) continue;
+      const matched = filter.observeTurn(ev.deltaDeg);
+      turnLog.push({ t: ev.t, deltaDeg: ev.deltaDeg, matched, pOffAfter: filter.pOff });
     } else {
       const sinceStep = steps.length ? Math.min(...steps.map((s) => Math.abs(s - ev.t))) : Infinity;
       if (sinceStep > 1.5) filter.predictIdle(ev.t - lastT);
@@ -576,7 +667,7 @@ function replay(profile, session) {
     timeline.push({ t: ev.t, meanBin, pOff, kind: ev.kind });
   }
 
-  return { gp, filter, steps, timeline, checkpointStates, offRouteAt, mm, observed };
+  return { gp, filter, steps, timeline, checkpointStates, offRouteAt, mm, observed, turnLog };
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +708,13 @@ function scoreAndPrint(profile, session, r) {
   console.log('');
   const maxOff = Math.max(...timeline.map((p) => p.pOff));
   console.log(`P(OFF): max ${maxOff.toFixed(2)} · off-route flagged: ${offRouteAt !== null ? `yes @ ${rel(offRouteAt, timeline)}` : 'no'}`);
+
+  // Turn anchors
+  const signature = r.gp.turns.map((t) => `${t.deltaDeg > 0 ? '+' : ''}${t.deltaDeg}°@bin${t.bin}`).join(' ') || 'none';
+  console.log(`Turn signature: ${signature}`);
+  for (const turn of r.turnLog) {
+    console.log(`  turn ${rel(turn.t, timeline)} ${turn.deltaDeg > 0 ? '+' : ''}${turn.deltaDeg.toFixed(0)}° -> ${turn.matched ? 'MATCH (snap)' : 'unmatched'} · P(OFF) ${turn.pOffAfter.toFixed(2)}`);
+  }
 
   // True meters error (clean passes with AR)
   if (mm) {

@@ -276,6 +276,9 @@ private struct LivePositioningContent: View {
                     diagnosticRow("Posterior spread", String(format: "%.0f bins", controller.posteriorStdBins))
                     diagnosticRow("Magnetic updates", "\(controller.magneticUpdates)")
                     diagnosticRow("Last window", controller.lastWindowStatus)
+                    if let turn = controller.lastTurnLabel {
+                        diagnosticRow("Last turn", turn)
+                    }
                     if let reason = controller.lastAdvanceReason {
                         diagnosticRow("Last advance", reason)
                     }

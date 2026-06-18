@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "createdAtUnix": 1781155205,
+  "createdAtUnix": 1781159105,
   "route": {
     "venueId": "Plumeria",
     "routeId": "Test",
@@ -1557,6 +1557,14 @@
           0.851575
         ]
       }
+    }
+  ],
+  "turns": [
+    {
+      "bin": 350,
+      "deltaDeg": -159,
+      "sigmaBins": 18,
+      "passes": 3
     }
   ]
 }

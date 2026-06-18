@@ -23,6 +23,15 @@ enum FilterParams {
     static let idleDiffusionSigma = 0.6
     static let checkpointTau = 0.8
     static let offRouteTau = 0.5
+    // Turn-anchor observation (Phase 3) — see analysis/grid-filter.js for the
+    // validated reference values.
+    static let turnMatchToleranceDeg = 55.0
+    static let turnLikFloor = 0.05
+    static let turnOffLik = 0.3
+    static let turnNegativeMinDeg = 100.0
+    static let turnUTurnOffLeak = 0.5
+    static let turnReversalLeakPerStep = 0.12
+    static let turnReversalSteps = 8
 }
 
 /// All profile segments concatenated onto one global bin axis.
@@ -44,6 +53,7 @@ struct GlobalRouteProfile {
     /// sits at and the decision bin (half a stride early, so end-of-route anchors
     /// are not a single unreachable boundary bin).
     let checkpoints: [(name: String, bin: Int, decisionBin: Int)]
+    let turns: [RouteTurn]
     let bins: Int
 
     init(profile: RouteProfile) throws {
@@ -84,6 +94,7 @@ struct GlobalRouteProfile {
             checkpoints.append((seg.to, bin, decision))
         }
         self.checkpoints = checkpoints
+        self.turns = profile.turns ?? []
     }
 
     func segment(ofBin bin: Int) -> Segment {
@@ -98,6 +109,7 @@ final class RouteBeliefFilter {
     let profile: GlobalRouteProfile
     private(set) var belief: [Double]
     private(set) var pOff: Double = 0
+    private var reversalStepsLeft = 0
 
     init(profile: GlobalRouteProfile) {
         self.profile = profile
@@ -164,7 +176,57 @@ final class RouteBeliefFilter {
         }
         belief = next
         pOff = pOff * FilterParams.offStay + leaked
+        // Steps taken while the heading is unexplained (after an unmatched
+        // U-turn) are not credible route progress.
+        if reversalStepsLeft > 0 {
+            reversalStepsLeft -= 1
+            var mass = 0.0
+            for i in belief.indices {
+                let leak = belief[i] * FilterParams.turnReversalLeakPerStep
+                belief[i] -= leak
+                mass += leak
+            }
+            pOff += mass
+        }
         normalize()
+    }
+
+    /// Turn-anchor observation (Phase 3, UnLoc-style landmark reset), ported
+    /// from analysis/grid-filter.js observeTurn. A matched turn re-concentrates
+    /// belief that already has support near the signature bin; an unmatched
+    /// U-turn-scale rotation is a transition into OFF plus a sustained leak
+    /// while the heading stays unexplained. Returns true on a signature match.
+    @discardableResult
+    func observeTurn(deltaDeg: Double) -> Bool {
+        let matches = profile.turns.filter {
+            ($0.deltaDeg < 0) == (deltaDeg < 0) &&
+                abs(deltaDeg - $0.deltaDeg) <= FilterParams.turnMatchToleranceDeg
+        }
+        if matches.isEmpty {
+            guard abs(deltaDeg) >= FilterParams.turnNegativeMinDeg else { return false }
+            var moved = 0.0
+            for i in belief.indices {
+                let leak = belief[i] * FilterParams.turnUTurnOffLeak
+                belief[i] -= leak
+                moved += leak
+            }
+            pOff += moved
+            reversalStepsLeft = FilterParams.turnReversalSteps
+            normalize()
+            return false
+        }
+        for i in belief.indices {
+            var lik = FilterParams.turnLikFloor
+            for turn in matches {
+                let d = (Double(i) - Double(turn.bin)) / turn.sigmaBins
+                lik += exp(-0.5 * d * d)
+            }
+            belief[i] *= lik
+        }
+        pOff *= FilterParams.turnOffLik
+        reversalStepsLeft = 0
+        normalize()
+        return true
     }
 
     /// A step happened but magnetic evidence could not corroborate it (flat window,

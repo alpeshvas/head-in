@@ -9,7 +9,7 @@ Updated: 2026-06-11 (end of grid-filter validation session)
 | **0 — Survey recorder upgrades** | ✅ Done. Schema 2: pass types (normal/pacing/offRoute/standing/live), opt-in ARKit 6-DoF ground truth (surveyor-only camera; runtime stays camera-free), raw vectors/gravity/gyro already in `dm` lines. |
 | **1 — Replay harness + metrics** | ✅ Mostly. `analysis/ground-truth.js` (ARKit arc-length truth), `analysis/match-route.js` reports true meters, `analysis/grid-filter.js` replay + `--calibrate` (Newson-Krumm fitting). Gaps: leave-one-out rotation, live-trace scorer prints "FALSE ADVANCE" for ungraded live fires (cosmetic). |
 | **2 — Grid Bayes filter + OFF state** | ✅ Done & validated offline + live. JS reference `analysis/grid-filter.js`, Swift port `survey-recorder/SurveyRecorder/RouteBeliefFilter.swift` (must be kept in sync BY HAND — parity test still missing). |
-| **3 — Anchors** | ⏭ NEXT: **turn anchors from gyro** (fixes the one known defect: pacing can false-fire the FIRST checkpoint — direction-blind step kernel). Then audio-playback prior, accuracy-gated GPS, entrance anchoring. |
+| **3 — Anchors** | 🔄 IN PROGRESS. **Turn anchors implemented + validated offline** (2026-06-11): `analysis/turn-events.js` (gyro gravity-axis yaw turn detection, half-rotation localization), turn signature in profiles (`build-profile.js`, majority-vote clustering, ARKit arc-length localization), turn observation in both filters (matched turn = positional emission bump; unmatched U-turn = OFF-mass injection + 8-step reversal leak). Pacing false fire eliminated (was −10.5 s mid-pacing → now −4.2 s during the real walk-out); clean passes unchanged (3/3, P50 0.22 m). **Live walk validation pending.** Next anchors: audio-playback prior, accuracy-gated GPS, entrance anchoring. |
 | **4 — Scale** | Later: distinctiveness maps, crowdsourced fingerprints, neural odometry (RoNIN; needs own training data for commercial). |
 
 ## Validated results (Plumeria home route, 3 segments, ~12 m)
@@ -19,6 +19,7 @@ Updated: 2026-06-11 (end of grid-filter validation session)
 - **Live clean walk** (trace `recordings-new/Plumeria_Test_forward_hand_live_20260611-113118.jsonl`): 3/3 fires (7.1/9.8/17.6 s), P(OFF) max 0.24, 20/25 steps corroborated. JS parity replay agrees structurally.
 - **Live pacing test**: no checkpoints fired, "Off route?" flagged, grey "last agreed" ring — all three hardening fixes verified (corroboration gate: no observation in last 2 steps ⇒ no fire; unobserved-step OFF leak 0.04; kernel overflow past route end ⇒ OFF).
 - Calibrated params (fitted, hand pose, Plumeria): sensorSigmaUT=1.5, offLogLikPerPoint=-4.86. THE PAIR IS COUPLED — re-fit OFF whenever sigma changes (`--calibrate`).
+- **Turn signature (Plumeria)**: one majority turn, −159°@bin350±18 (all 3 passes, ARKit-localized 5.2–5.7 m). Offline: pacing U-turns (+172°, −129°) inject P(OFF)=0.5 and kill the early fire; clean passes match the signature and are otherwise unchanged. Profiles rebuilt with `turns[]`; bundled Plumeria resource updated (Meadows profile has no turns — decodes as optional).
 
 ## Filter architecture (both implementations)
 
@@ -39,8 +40,8 @@ Updated: 2026-06-11 (end of grid-filter validation session)
 
 ## Outstanding (in priority order)
 
-1. **Turn anchors** (Phase 3): gyro yaw turn events matched against route turn signature → snap progress, flag missing/unexpected turns. Fixes pacing first-checkpoint false fire.
-2. **JS↔Swift parity test** (shared fixture; second hand-sync already happened — biggest correctness risk).
+1. **Validate turn anchors live** (clean walk: −159° turn should show "matched" in diagnostics, 3/3 checkpoints; pacing: no false fire). Turn params (`turnUTurnOffLeak` 0.5 etc.) are hand-chosen, not fitted — sweep when more negative traces exist. Missing-turn evidence (walked past bin 350 without turning) not implemented.
+2. **JS↔Swift parity test** (shared fixture; THIRD hand-sync just happened (observeTurn + reversal leak) — biggest correctness risk).
 3. ~~Commit the working tree~~ ✅ Done 2026-06-11 (four logical commits: recorder upgrades, analysis tooling, live positioning tab, recordings+docs). Note: `recordings/` and `recordings-new/` hold near-duplicate session sets — consolidate sometime.
 4. Cosmetics: live-trace scorer label; freeze segment label when off-route; HTML meters in match-route. (Fixed 2026-06-11: segment card/rings now floored at last reached checkpoint via `displayBin`, so they can no longer contradict the ratcheted timeline.)
 5. More negative recordings (off-route walk in a different room, standing pass) + pocket-carry passes; re-fit params as traces accumulate.

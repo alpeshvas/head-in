@@ -10,8 +10,12 @@
 
 const fs = require('fs');
 const path = require('path');
+const turnEvents = require('./turn-events');
+const { buildArcLength } = require('./ground-truth');
 
 const RESAMPLE_POINTS = 240;
+const TURN_CLUSTER_GAP_BINS = 80;
+const TURN_MIN_SIGMA_BINS = 12;
 const DTW_BAND_FRACTION = 0.1;
 const TRANSITION_MAX_MEDIAN_DURATION_SEC = 4.0;
 const TRANSITION_MAX_MEDIAN_STEPS = 5;
@@ -515,6 +519,83 @@ function buildProfile(sessions) {
   };
 }
 
+/**
+ * Phase-3 turn signature: gyro turn events from every survey pass, located on
+ * the profile's global bin axis, clustered across passes. Only turns seen in a
+ * majority of passes survive — one-off wiggles and the surveyor's end-of-route
+ * turn-around drop out. Position within a segment comes from ARKit arc length
+ * when the pass recorded ground truth (time fraction is a poor localizer:
+ * walking slows mid-turn), falling back to time fraction otherwise.
+ */
+function buildTurnSignature(filePaths, profile) {
+  const startBins = new Map();
+  let acc = 0;
+  for (const seg of profile.segments) {
+    startBins.set(seg.index, acc);
+    acc += seg.magneticMagnitude.mean.length;
+  }
+
+  const perPass = [];
+  for (const filePath of filePaths) {
+    const session = turnEvents.parseSession(filePath);
+    const anchors = session.anchors;
+    let arc = null;
+    if (session.arPoses.filter((p) => p.tracking === 'normal').length > 50) {
+      try { arc = buildArcLength(session.arPoses); } catch { arc = null; }
+    }
+    const located = [];
+    for (const turn of turnEvents.detectTurns(session.dm)) {
+      for (let i = 0; i + 1 < anchors.length; i++) {
+        if (turn.t < anchors[i].t || turn.t >= anchors[i + 1].t) continue;
+        const startBin = startBins.get(anchors[i].index);
+        if (startBin === undefined) break;
+        const count = profile.segments.find((s) => s.index === anchors[i].index).magneticMagnitude.mean.length;
+        let f;
+        if (arc) {
+          const m0 = arc.lengthAt(anchors[i].t);
+          const m1 = arc.lengthAt(anchors[i + 1].t);
+          f = m1 > m0 ? (arc.lengthAt(turn.t) - m0) / (m1 - m0) : 0;
+        } else {
+          f = (turn.t - anchors[i].t) / (anchors[i + 1].t - anchors[i].t);
+        }
+        located.push({ bin: startBin + Math.min(Math.max(f, 0), 1) * (count - 1), deltaDeg: turn.deltaDeg });
+        break;
+      }
+    }
+    perPass.push(located);
+  }
+
+  // Cluster across passes: same turn direction, nearby bins.
+  const all = perPass.flatMap((turns, pass) => turns.map((t) => ({ ...t, pass }))).sort((a, b) => a.bin - b.bin);
+  const clusters = [];
+  for (const turn of all) {
+    const cluster = clusters.find(
+      (c) => Math.sign(c.turns[0].deltaDeg) === Math.sign(turn.deltaDeg) &&
+        Math.abs(c.turns[c.turns.length - 1].bin - turn.bin) <= TURN_CLUSTER_GAP_BINS
+    );
+    if (cluster) cluster.turns.push(turn);
+    else clusters.push({ turns: [turn] });
+  }
+
+  const minPasses = Math.ceil((filePaths.length + 1) / 2);
+  const signature = [];
+  for (const cluster of clusters) {
+    const passes = new Set(cluster.turns.map((t) => t.pass)).size;
+    if (passes < minPasses) continue;
+    const bins = cluster.turns.map((t) => t.bin);
+    const deltas = cluster.turns.map((t) => t.deltaDeg);
+    const binMean = bins.reduce((a, b) => a + b, 0) / bins.length;
+    const binStd = Math.sqrt(bins.reduce((a, b) => a + (b - binMean) ** 2, 0) / bins.length);
+    signature.push({
+      bin: Math.round(binMean),
+      deltaDeg: Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length),
+      sigmaBins: Math.round(Math.max(TURN_MIN_SIGMA_BINS, 1.5 * binStd)),
+      passes,
+    });
+  }
+  return signature.sort((a, b) => a.bin - b.bin);
+}
+
 function printSessionSummary(sessions) {
   for (const session of sessions) {
     const magNote = session.calibratedMagnetic ? 'calibrated dm.mag' : 'RAW mag fallback';
@@ -576,6 +657,13 @@ function main() {
   }
 
   printSegmentTable(profile.segments);
+
+  profile.turns = buildTurnSignature(args.files, profile);
+  console.log(
+    profile.turns.length
+      ? `\nTurn signature: ${profile.turns.map((t) => `${t.deltaDeg > 0 ? '+' : ''}${t.deltaDeg}°@bin${t.bin}±${t.sigmaBins} (${t.passes}p)`).join('  ')}`
+      : '\nTurn signature: no majority turns detected'
+  );
 
   fs.mkdirSync(path.dirname(args.out), { recursive: true });
   fs.writeFileSync(args.out, JSON.stringify(profile, null, 2) + '\n');

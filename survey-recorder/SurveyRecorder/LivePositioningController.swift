@@ -37,12 +37,14 @@ final class LivePositioningController {
     private(set) var magneticUpdates = 0
     private(set) var lastWindowStatus = "warming up"
     private(set) var lastAdvanceReason: String?
+    private(set) var lastTurnLabel: String?
 
     @ObservationIgnored private let gp: GlobalRouteProfile
     @ObservationIgnored private var filter: RouteBeliefFilter
     @ObservationIgnored private let recorder = SensorRecorder()
     @ObservationIgnored private var runIdentifier = 0
     @ObservationIgnored private var stepDetector = LiveStepDetector()
+    @ObservationIgnored private var turnDetector = LiveTurnDetector()
     @ObservationIgnored private var motionMode = LiveMotionMode.starting
     @ObservationIgnored private var recentMotionSamples: [MotionClassifierSample] = []
     @ObservationIgnored private var recentStepTimes: [TimeInterval] = []
@@ -123,6 +125,7 @@ final class LivePositioningController {
         isComplete = false
         isRunning = true
         lastAdvanceReason = nil
+        lastTurnLabel = nil
         pOff = 0
         globalProgress = 0
         segmentProgress = 0
@@ -134,6 +137,7 @@ final class LivePositioningController {
         lastIdleTick = nil
         stepsSinceObservation = .max
         stepDetector.reset()
+        turnDetector.reset()
         resetMotionClassifier()
         statusText = "Starting at \(profile.anchors.first?.name ?? "Start")"
 
@@ -234,6 +238,27 @@ final class LivePositioningController {
         let cutoff = timestamp - magBufferSeconds
         if let firstKept = magBuffer.firstIndex(where: { $0.t >= cutoff }), firstKept > 0 {
             magBuffer.removeFirst(firstKept)
+        }
+
+        // Turn anchors (Phase 3): gravity-axis yaw rate feeds the turn detector
+        // on every sample; a closed turn region becomes a filter observation.
+        let g = motion.gravity
+        let gravityMagnitude = hypot3(g.x, g.y, g.z)
+        if gravityMagnitude > 0 {
+            let yawRate = -(rotation.x * g.x + rotation.y * g.y + rotation.z * g.z) / gravityMagnitude
+            if let turn = turnDetector.addSample(t: timestamp, yawRate: yawRate) {
+                let matched = filter.observeTurn(deltaDeg: turn.deltaDeg)
+                lastTurnLabel = "\(turn.deltaDeg > 0 ? "+" : "")\(Int(turn.deltaDeg.rounded()))° \(matched ? "matched" : "unmatched")"
+                traceWriter?.writeLine([
+                    "type": "turn",
+                    "t": jsonRound(timestamp),
+                    "deltaDeg": jsonRound(turn.deltaDeg, 1),
+                    "endT": jsonRound(turn.endT),
+                    "matched": matched,
+                ])
+                refreshOutputs(at: timestamp)
+                if isComplete { return }
+            }
         }
 
         let didStep = stepDetector.addSample(t: timestamp, magnitude: uaMagnitude)
@@ -495,6 +520,78 @@ private struct MotionClassifierSample {
     let userAccelerationMagnitude: Double
     let rotationMagnitude: Double
     let magneticMagnitude: Double
+}
+
+/// Incremental port of analysis/turn-events.js detectTurns: smoothed
+/// gravity-axis yaw rate, contiguous |rate|>threshold regions merged across
+/// short gaps, emitted when the region closes. Candidates are evaluated
+/// `smoothRadiusS` behind the newest sample so smoothing stays centered,
+/// matching the offline reference.
+private struct LiveTurnDetector {
+    struct Turn {
+        let deltaDeg: Double
+        let endT: TimeInterval
+    }
+
+    private static let smoothRadiusS = 0.15
+    private static let turnRateThresh = 0.35
+    private static let minTurnDeg = 35.0
+    private static let mergeGapS = 0.5
+
+    private var buffer: [(t: TimeInterval, rate: Double)] = []
+    private var processedUpTo = -Double.infinity
+    private var lastCandidate: (t: TimeInterval, rate: Double)?
+    private var region: (startT: TimeInterval, endT: TimeInterval, deltaRad: Double)?
+
+    mutating func reset() {
+        buffer.removeAll(keepingCapacity: true)
+        processedUpTo = -.infinity
+        lastCandidate = nil
+        region = nil
+    }
+
+    mutating func addSample(t: TimeInterval, yawRate: Double) -> Turn? {
+        guard yawRate.isFinite else { return nil }
+        buffer.append((t, yawRate))
+        if let firstKept = buffer.firstIndex(where: { $0.t >= t - 2 * Self.smoothRadiusS - 0.1 }), firstKept > 0 {
+            buffer.removeFirst(firstKept)
+        }
+
+        var emitted: Turn?
+        // Candidates become evaluable once the buffer extends smoothRadius past them.
+        for candidate in buffer where candidate.t > processedUpTo && candidate.t <= t - Self.smoothRadiusS {
+            processedUpTo = candidate.t
+            var sum = 0.0
+            var n = 0
+            for s in buffer where abs(s.t - candidate.t) <= Self.smoothRadiusS {
+                sum += s.rate
+                n += 1
+            }
+            let rate = n > 0 ? sum / Double(n) : 0
+            let dt = lastCandidate.map { candidate.t - $0.t } ?? 0
+            lastCandidate = (candidate.t, rate)
+
+            if abs(rate) > Self.turnRateThresh {
+                if let open = region, candidate.t - open.endT > Self.mergeGapS {
+                    emitted = close(open) ?? emitted
+                    region = nil
+                }
+                if region == nil { region = (candidate.t, candidate.t, 0) }
+                region!.deltaRad += rate * dt
+                region!.endT = candidate.t
+            } else if let open = region, candidate.t - open.endT > Self.mergeGapS {
+                emitted = close(open) ?? emitted
+                region = nil
+            }
+        }
+        return emitted
+    }
+
+    private func close(_ region: (startT: TimeInterval, endT: TimeInterval, deltaRad: Double)) -> Turn? {
+        let deltaDeg = region.deltaRad * 180 / .pi
+        guard abs(deltaDeg) >= Self.minTurnDeg else { return nil }
+        return Turn(deltaDeg: deltaDeg, endT: region.endT)
+    }
 }
 
 private struct LiveStepDetector {
