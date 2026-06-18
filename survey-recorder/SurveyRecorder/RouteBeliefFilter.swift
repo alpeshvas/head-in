@@ -1,0 +1,285 @@
+import Foundation
+
+/// Discrete-grid Bayes filter over global route position with an explicit OFF-route
+/// state. Direct Swift port of analysis/grid-filter.js (the Phase 2 estimator from
+/// docs/research/SYNTHESIS.md), validated offline against recorded passes before
+/// being wired into the Live tab. Keep the two implementations in sync.
+///
+/// Parameters marked "fitted" come from `node analysis/grid-filter.js --calibrate`
+/// against the held-out Plumeria clean pass. Re-fit per venue/pose as data grows;
+/// offLogLikPerPoint is only valid for the sensorSigmaUT it was fitted under.
+enum FilterParams {
+    static let sensorSigmaUT = 1.5          // fitted
+    static let offLogLikPerPoint = -4.86    // fitted (valid for sensorSigmaUT 1.5)
+    static let minWindowRangeUT = 3.0
+    static let windowSteps = 4
+    static let stepNoiseFrac = 0.35
+    static let kernelFloor = 1e-4
+    static let obsIndependenceBins = 8.0
+    static let offLeakPerStep = 0.02
+    static let unobservedOffLeak = 0.04    // extra leak when a step had no magnetic corroboration
+    static let observationRecencySteps = 2 // checkpoint decisions need an observation this recent
+    static let offStay = 0.95
+    static let idleDiffusionSigma = 0.6
+    static let checkpointTau = 0.8
+    static let offRouteTau = 0.5
+}
+
+/// All profile segments concatenated onto one global bin axis.
+struct GlobalRouteProfile {
+    struct Segment {
+        let index: Int
+        let from: String
+        let to: String
+        let isTransition: Bool
+        let startBin: Int
+        let count: Int
+        let binsPerStep: Double
+    }
+
+    let mean: [Double]
+    let std: [Double]
+    let segments: [Segment]
+    /// Ordered checkpoint decisions: every anchor after the start, with the bin it
+    /// sits at and the decision bin (half a stride early, so end-of-route anchors
+    /// are not a single unreachable boundary bin).
+    let checkpoints: [(name: String, bin: Int, decisionBin: Int)]
+    let bins: Int
+
+    init(profile: RouteProfile) throws {
+        var mean: [Double] = []
+        var std: [Double] = []
+        var segments: [Segment] = []
+
+        for seg in profile.segments {
+            guard let m = seg.magneticMagnitude?.mean, m.count >= 2 else {
+                throw RouteProfileError.noMatchingSegments
+            }
+            let s = seg.magneticMagnitude?.stddev ?? []
+            let startBin = mean.count
+            for i in 0..<m.count {
+                mean.append(m[i])
+                std.append(i < s.count && s[i].isFinite ? max(s[i], 0.2) : 1.0)
+            }
+            segments.append(Segment(
+                index: seg.index,
+                from: seg.from,
+                to: seg.to,
+                isTransition: seg.isTransition,
+                startBin: startBin,
+                count: m.count,
+                binsPerStep: Double(m.count) / max(seg.medianSteps, 1)
+            ))
+        }
+
+        self.mean = mean
+        self.std = std
+        self.segments = segments
+        self.bins = mean.count
+
+        var checkpoints: [(String, Int, Int)] = []
+        for seg in segments {
+            let bin = seg.startBin + seg.count - 1
+            let decision = max(0, Int((Double(bin) - 0.5 * seg.binsPerStep).rounded()))
+            checkpoints.append((seg.to, bin, decision))
+        }
+        self.checkpoints = checkpoints
+    }
+
+    func segment(ofBin bin: Int) -> Segment {
+        for seg in segments where bin < seg.startBin + seg.count {
+            return seg
+        }
+        return segments[segments.count - 1]
+    }
+}
+
+final class RouteBeliefFilter {
+    let profile: GlobalRouteProfile
+    private(set) var belief: [Double]
+    private(set) var pOff: Double = 0
+
+    init(profile: GlobalRouteProfile) {
+        self.profile = profile
+        belief = [Double](repeating: 0, count: profile.bins)
+        for i in 0..<min(8, profile.bins) {
+            belief[i] = exp(-Double(i) / 3)
+        }
+        normalize()
+    }
+
+    private func normalize() {
+        var sum = pOff
+        for v in belief { sum += v }
+        guard sum > 0 else {
+            let u = 1.0 / Double(belief.count)
+            for i in belief.indices { belief[i] = u }
+            pOff = 0
+            return
+        }
+        for i in belief.indices { belief[i] /= sum }
+        pOff /= sum
+    }
+
+    /// One detected step: advance by the per-segment stride with noise, a small
+    /// backward/stay tail, and a leak into OFF.
+    func predictStep() {
+        let gp = profile
+        var next = [Double](repeating: 0, count: gp.bins)
+        var leaked = 0.0
+
+        for i in 0..<gp.bins {
+            let p = belief[i]
+            if p <= 0 { continue }
+            let m = gp.segment(ofBin: i).binsPerStep
+            let sigma = max(0.8, FilterParams.stepNoiseFrac * m)
+            let lo = Int((Double(i) - m).rounded(.down))
+            let hi = Int((Double(i) + 3 * m).rounded(.up))
+            var kernelSum = 0.0
+            for j in lo...hi {
+                let d = (Double(j - i) - m) / sigma
+                kernelSum += exp(-0.5 * d * d) + FilterParams.kernelFloor
+            }
+            let stay = p * (1 - FilterParams.offLeakPerStep)
+            for j in lo...hi {
+                let d = (Double(j - i) - m) / sigma
+                let k = exp(-0.5 * d * d) + FilterParams.kernelFloor
+                let share = stay * (k / kernelSum)
+                if j < 0 {
+                    next[0] += share          // route start is a barrier
+                } else if j >= gp.bins {
+                    leaked += share           // stepping past the route end = off-route evidence
+                } else {
+                    next[j] += share
+                }
+            }
+            leaked += p * FilterParams.offLeakPerStep
+        }
+
+        let reenter = pOff * (1 - FilterParams.offStay)
+        var beliefSum = 0.0
+        for v in next { beliefSum += v }
+        if beliefSum > 0 && reenter > 0 {
+            for i in next.indices { next[i] += reenter * (next[i] / beliefSum) }
+        }
+        belief = next
+        pOff = pOff * FilterParams.offStay + leaked
+        normalize()
+    }
+
+    /// A step happened but magnetic evidence could not corroborate it (flat window,
+    /// uncalibrated sensor): motion without verification raises route uncertainty.
+    func applyUnobservedLeak() {
+        var mass = 0.0
+        for i in belief.indices {
+            let leak = belief[i] * FilterParams.unobservedOffLeak
+            belief[i] -= leak
+            mass += leak
+        }
+        pOff += mass
+        normalize()
+    }
+
+    /// Standing/idle: tiny diffusion only.
+    func predictIdle(dt: Double) {
+        let sigma = FilterParams.idleDiffusionSigma * max(dt, 0)
+        guard sigma >= 0.05 else { return }
+        let radius = Int((3 * sigma).rounded(.up))
+        var kernel: [Double] = []
+        var ks = 0.0
+        for d in -radius...radius {
+            let k = exp(-0.5 * pow(Double(d) / sigma, 2))
+            kernel.append(k)
+            ks += k
+        }
+        var next = [Double](repeating: 0, count: profile.bins)
+        for i in 0..<profile.bins {
+            let p = belief[i]
+            if p <= 0 { continue }
+            for d in -radius...radius {
+                let j = min(profile.bins - 1, max(0, i + d))
+                next[j] += p * (kernel[d + radius] / ks)
+            }
+        }
+        belief = next
+        normalize()
+    }
+
+    /// Emission update. `windowForSegment` returns the live magnitude window
+    /// resampled to that segment's bin rate (per detected step), or nil when
+    /// unavailable/flat. Returns false when no window was usable.
+    func observe(windowForSegment: (GlobalRouteProfile.Segment) -> [Double]?) -> Bool {
+        let gp = profile
+        var logLik = [Double](repeating: .nan, count: gp.bins)
+        var windowCache: [Int: [Double]?] = [:]
+        var anyWindow = false
+
+        for s in 0..<gp.bins {
+            let seg = gp.segment(ofBin: s)
+            if windowCache[seg.index] == nil { windowCache[seg.index] = windowForSegment(seg) }
+            guard let live = windowCache[seg.index] ?? nil else { continue }
+            let L = live.count
+            guard s - L + 1 >= 0 else { continue }
+
+            var liveMean = 0.0
+            var profMean = 0.0
+            for k in 0..<L {
+                liveMean += live[k]
+                profMean += gp.mean[s - L + 1 + k]
+            }
+            liveMean /= Double(L)
+            profMean /= Double(L)
+
+            var ll = 0.0
+            for k in 0..<L {
+                let idx = s - L + 1 + k
+                let resid = (live[k] - liveMean) - (gp.mean[idx] - profMean)
+                let v = gp.std[idx] * gp.std[idx] + FilterParams.sensorSigmaUT * FilterParams.sensorSigmaUT
+                ll += -0.5 * (resid * resid / v + log(2 * Double.pi * v))
+            }
+            logLik[s] = (ll / Double(L)) * FilterParams.obsIndependenceBins
+            anyWindow = true
+        }
+        guard anyWindow else { return false }
+
+        let offLL = FilterParams.offLogLikPerPoint * FilterParams.obsIndependenceBins
+        var maxLL = offLL
+        for ll in logLik where ll.isFinite && ll > maxLL { maxLL = ll }
+        for s in 0..<gp.bins where logLik[s].isFinite {
+            belief[s] *= exp(logLik[s] - maxLL)
+        }
+        pOff *= exp(offLL - maxLL)
+        normalize()
+        return true
+    }
+
+    var meanBin: Double {
+        var m = 0.0
+        var w = 0.0
+        for i in belief.indices {
+            m += Double(i) * belief[i]
+            w += belief[i]
+        }
+        return w > 0 ? m / w : 0
+    }
+
+    /// On-route probability mass at or beyond `bin` (OFF mass excluded).
+    func probBeyond(bin: Int) -> Double {
+        guard bin < belief.count else { return 0 }
+        var p = 0.0
+        for i in bin..<belief.count { p += belief[i] }
+        return p
+    }
+
+    /// Posterior standard deviation in bins — a concentration/confidence signal.
+    var beliefStdDev: Double {
+        let m = meanBin
+        var v = 0.0
+        var w = 0.0
+        for i in belief.indices {
+            v += belief[i] * pow(Double(i) - m, 2)
+            w += belief[i]
+        }
+        return w > 0 ? (v / w).squareRoot() : 0
+    }
+}

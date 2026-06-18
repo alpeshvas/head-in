@@ -7,6 +7,8 @@ struct SurveyRecorderApp: App {
             TabView {
                 NavigationStack { SetupView() }
                     .tabItem { Label("Survey", systemImage: "record.circle") }
+                NavigationStack { LivePositioningView() }
+                    .tabItem { Label("Live", systemImage: "location.north.circle") }
                 NavigationStack { SessionsView() }
                     .tabItem { Label("Sessions", systemImage: "tray.full") }
             }
