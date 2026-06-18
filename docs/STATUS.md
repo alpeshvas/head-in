@@ -30,7 +30,7 @@ Updated: 2026-06-11 (end of grid-filter validation session)
 
 ## Survey UX: ad-hoc checkpoints (added 2026-06-19)
 
-Leave the Setup checkpoint list EMPTY to enter ad-hoc mode: during recording, type the upcoming checkpoint's name (optional) while walking up to it, then tap "Drop checkpoint" at the exact arrival instant (typing never delays the anchor timestamp; empty → auto "Checkpoint N", renameable offline). Predefined-list mode is unchanged. The pipeline already reconstructs everything from `anchor` lines, so no analysis-side change was needed; ad-hoc sessions also write the final ordered name list into the `end` line (meta.checkpoints is empty for them). `RecordingController.isAdHoc` = empty setup list; `dropCheckpoint(pendingName:)` / `recordedCheckpoints`.
+Leave the Setup checkpoint list EMPTY to enter ad-hoc mode: during recording, type the upcoming checkpoint's name (optional) while walking up to it, then tap "Drop checkpoint" at the exact arrival instant (typing never delays the anchor timestamp; empty → auto "Checkpoint N", renameable offline). Predefined-list mode is unchanged. The pipeline already reconstructs everything from `anchor` lines, so no analysis-side change was needed; ad-hoc sessions also write the final ordered name list into the `end` line (meta.checkpoints is empty for them). `RecordingController.isAdHoc` = empty setup list; `dropCheckpoint(pendingName:)` / `recordedCheckpoints`. After an ad-hoc pass, the dropped names auto-populate the Setup checkpoint field, so pass 2+ of the same route uses the fast predefined tap-through with matching names (build-profile merges segments by name) — ad-hoc bootstraps a route, then it's an ordinary multi-pass survey.
 
 ## Filter architecture (both implementations)
 

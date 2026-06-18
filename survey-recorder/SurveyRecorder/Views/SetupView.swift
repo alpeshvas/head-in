@@ -104,6 +104,13 @@ struct SetupView: View {
         .navigationTitle("Survey")
         .fullScreenCover(item: $controller) { controller in
             RecordView(controller: controller) {
+                // After an ad-hoc pass, capture the dropped checkpoint names
+                // back into the list so every later pass of this route uses
+                // the fast predefined tap-through (and the names match across
+                // passes, which build-profile requires to merge segments).
+                if controller.isAdHoc, controller.recordedCheckpoints.count >= 2 {
+                    checkpointsText = controller.recordedCheckpoints.joined(separator: "\n")
+                }
                 self.controller = nil
             }
         }
