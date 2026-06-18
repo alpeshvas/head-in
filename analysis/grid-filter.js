@@ -48,6 +48,8 @@ const PARAMS = {
   unobservedOffLeak: 0.04,   // EXTRA leak when a step had no magnetic corroboration
   observationRecencySteps: 2, // checkpoint decisions need an observation this recent
   offStay: 0.95,             // P(stay OFF) per step
+  reentrySigmaStrides: 2,    // OFF re-entry kernel width around last confident mode
+  confidentPOff: 0.3,        // posterior counts as confidently on-route below this
   idleDiffusionSigma: 0.6,   // bins/sec of diffusion while standing
   checkpointTau: 0.8,        // P(position >= checkpoint) needed to fire
   offRouteTau: 0.5,          // P(OFF) needed to flag off-route
@@ -253,7 +255,17 @@ class RouteGridFilter {
     for (let i = 0; i < Math.min(8, globalProfile.bins); i++) this.belief[i] = Math.exp(-i / 3);
     this.pOff = 0.0;
     this.reversalStepsLeft = 0;
+    // Last mode while the filter was confidently on-route — OFF re-entry
+    // anchors here (route-constrained-fusion.md: "re-entry kernel centered on
+    // last on-route mode").
+    this.lastConfidentMode = 0;
     this.normalize();
+  }
+
+  modeBin() {
+    let best = 0;
+    for (let i = 1; i < this.belief.length; i++) if (this.belief[i] > this.belief[best]) best = i;
+    return best;
   }
 
   normalize() {
@@ -262,6 +274,7 @@ class RouteGridFilter {
     if (sum <= 0) { this.belief.fill(1 / this.belief.length); this.pOff = 0; return; }
     for (let i = 0; i < this.belief.length; i++) this.belief[i] /= sum;
     this.pOff /= sum;
+    if (this.pOff < PARAMS.confidentPOff) this.lastConfidentMode = this.modeBin();
   }
 
   /** One detected step: advance by per-segment stride with noise + OFF leak. */
@@ -301,12 +314,28 @@ class RouteGridFilter {
       leaked += p * PARAMS.offLeakPerStep;
     }
 
-    // OFF dynamics: stay or re-enter proportional to current on-route shape.
+    // OFF dynamics: re-entry kernel centered on the LAST CONFIDENT on-route
+    // mode (route-constrained-fusion.md §filter spec), not proportional to the
+    // current shape — after an emission crushes the true mode, the surviving
+    // shape is whatever impostor bins were least bad (seen live: a mirrored
+    // corridor 1100 bins away captured the re-entry and locked the filter
+    // wrong). Weighting by shape *within* a local window keeps the kernel from
+    // resurrecting bins the evidence has genuinely ruled out nearby.
     const reenter = this.pOff * (1 - PARAMS.offStay);
-    let beliefSum = 0;
-    for (const v of next) beliefSum += v;
-    if (beliefSum > 0 && reenter > 0) {
-      for (let i = 0; i < next.length; i++) next[i] += reenter * (next[i] / beliefSum);
+    if (reenter > 0) {
+      const center = this.lastConfidentMode;
+      const sigma = PARAMS.reentrySigmaStrides * segmentOfBin(this.gp, center).binsPerStep;
+      let kernelSum = 0;
+      const lo = Math.max(0, Math.floor(center - 3 * sigma));
+      const hi = Math.min(this.gp.bins - 1, Math.ceil(center + 3 * sigma));
+      for (let i = lo; i <= hi; i++) {
+        kernelSum += (next[i] + 1e-12) * Math.exp(-0.5 * ((i - center) / sigma) ** 2);
+      }
+      if (kernelSum > 0) {
+        for (let i = lo; i <= hi; i++) {
+          next[i] += reenter * ((next[i] + 1e-12) * Math.exp(-0.5 * ((i - center) / sigma) ** 2)) / kernelSum;
+        }
+      }
     }
     this.belief = next;
     this.pOff = this.pOff * PARAMS.offStay + leaked;

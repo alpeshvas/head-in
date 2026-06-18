@@ -20,6 +20,8 @@ enum FilterParams {
     static let unobservedOffLeak = 0.04    // extra leak when a step had no magnetic corroboration
     static let observationRecencySteps = 2 // checkpoint decisions need an observation this recent
     static let offStay = 0.95
+    static let reentrySigmaStrides = 2.0   // OFF re-entry kernel width around last confident mode
+    static let confidentPOff = 0.3         // posterior counts as confidently on-route below this
     static let idleDiffusionSigma = 0.6
     static let checkpointTau = 0.8
     static let offRouteTau = 0.5
@@ -111,6 +113,10 @@ final class RouteBeliefFilter {
     private(set) var belief: [Double]
     private(set) var pOff: Double = 0
     private var reversalStepsLeft = 0
+    /// Last mode while confidently on-route — OFF re-entry anchors here
+    /// (route-constrained-fusion.md: "re-entry kernel centered on last
+    /// on-route mode").
+    private var lastConfidentMode = 0
 
     init(profile: GlobalRouteProfile) {
         self.profile = profile
@@ -132,6 +138,13 @@ final class RouteBeliefFilter {
         }
         for i in belief.indices { belief[i] /= sum }
         pOff /= sum
+        if pOff < FilterParams.confidentPOff { lastConfidentMode = modeBin() }
+    }
+
+    private func modeBin() -> Int {
+        var best = 0
+        for i in 1..<belief.count where belief[i] > belief[best] { best = i }
+        return best
     }
 
     /// One detected step: advance by the per-segment stride with noise, a small
@@ -174,11 +187,27 @@ final class RouteBeliefFilter {
             leaked += p * FilterParams.offLeakPerStep
         }
 
+        // OFF re-entry kernel centered on the LAST CONFIDENT on-route mode —
+        // not proportional to the current shape, which after an emission
+        // crushes the true mode is whatever impostor bins were least bad
+        // (a mirrored corridor 1100 bins away captured re-entry live).
         let reenter = pOff * (1 - FilterParams.offStay)
-        var beliefSum = 0.0
-        for v in next { beliefSum += v }
-        if beliefSum > 0 && reenter > 0 {
-            for i in next.indices { next[i] += reenter * (next[i] / beliefSum) }
+        if reenter > 0 {
+            let center = lastConfidentMode
+            let sigma = FilterParams.reentrySigmaStrides * gp.segment(ofBin: center).binsPerStep
+            let lo = max(0, Int((Double(center) - 3 * sigma).rounded(.down)))
+            let hi = min(gp.bins - 1, Int((Double(center) + 3 * sigma).rounded(.up)))
+            var kernelSum = 0.0
+            for i in lo...hi {
+                let d = (Double(i) - Double(center)) / sigma
+                kernelSum += (next[i] + 1e-12) * exp(-0.5 * d * d)
+            }
+            if kernelSum > 0 {
+                for i in lo...hi {
+                    let d = (Double(i) - Double(center)) / sigma
+                    next[i] += reenter * ((next[i] + 1e-12) * exp(-0.5 * d * d)) / kernelSum
+                }
+            }
         }
         belief = next
         pOff = pOff * FilterParams.offStay + leaked
