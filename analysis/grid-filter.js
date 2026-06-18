@@ -11,10 +11,12 @@
  *     per-segment calibrated stride (bins/step) with ~35% noise and a small
  *     backward/stay tail; standing applies only tiny diffusion. Every step
  *     leaks a little probability into OFF; OFF re-enters near the current mode.
- *   - Emission: mean-removed pointwise Gaussian of the last N steps of magnetic
- *     magnitude (resampled PER STEP to bin units, Magicol-style) against the
- *     profile mean/stddev (heteroscedastic noise). Flat windows (< minimum µT
- *     range) are skipped entirely. OFF emits against a structureless profile.
+ *   - Emission: stride-lag FIRST-DIFFERENCE pointwise Gaussian of the last N
+ *     steps of magnetic magnitude (resampled PER STEP to bin units), single
+ *     fitted homoscedastic noise (SYNTHESIS convergence pt. 1: FollowMe/MaLoc
+ *     differencing — direction-sensitive, device-invariant, recalibration-
+ *     immune, subsumes mean removal). Flat windows (< minimum µT range) are
+ *     skipped entirely; emission freezes in the 2-stride terminal region.
  *   - Decisions: checkpoint k fires when P(position >= anchor_k) > tau on two
  *     consecutive updates with P(OFF) < 0.5. Off-route fires when P(OFF) > 0.5
  *     sustained. No ratchet anywhere: the posterior may retreat.
@@ -33,12 +35,12 @@ const path = require('path');
 const { buildArcLength } = require('./ground-truth');
 const { detectTurns } = require('./turn-events');
 
-// sensorSigmaUT and offLogLikPerPoint were fitted with --calibrate against the
+// diffSigmaUT and offLogLikPerPoint were fitted with --calibrate against the
 // held-out Plumeria clean pass (hand pose). Re-fit per venue/pose as data grows.
 const PARAMS = {
-  sensorSigmaUT: 1.5,        // extra magnetic noise on top of survey stddev (µT); fitted
+  diffSigmaUT: 2.42,          // single homoscedastic first-difference noise (µT); fitted
   minWindowRangeUT: 3.0,     // flat-window gate: skip emission below this live range
-  windowSteps: 4,            // emission window length in detected steps
+  windowSteps: 6,            // emission window length in detected steps
   stepNoiseFrac: 0.35,       // stddev of stride noise as a fraction of bins/step
   kernelFloor: 1e-4,         // uniform floor inside the step kernel support (backtrack)
   obsIndependenceBins: 8,    // temper: ~1 independent magnetic observation per this many bins
@@ -54,7 +56,7 @@ const PARAMS = {
   // Fitted from replays via --calibrate (Newson-Krumm recipe): the typical
   // per-point log-likelihood of a live window evaluated at a WRONG position.
   // null -> fall back to the structureless-field OFF model.
-  offLogLikPerPoint: -4.86, // must be re-fitted whenever sensorSigmaUT changes
+  offLogLikPerPoint: -4.99, // must be re-fitted whenever diffSigmaUT changes
   // Turn-anchor observation (Phase 3). A detected turn that matches a profile
   // signature turn (same direction, magnitude within tolerance) concentrates
   // belief around the signature bin; a large turn matching nothing favors OFF.
@@ -205,29 +207,39 @@ function segmentOfBin(gp, bin) {
 }
 
 /**
- * Mean-removed Gaussian log-likelihood of a live window whose newest sample sits
- * at global bin `endBin`. Mean removal cancels device hard-iron bias and iOS
- * recalibration offsets (Magicol recipe). Returns per-point stats or null when
- * the window does not fit.
+ * First-difference Gaussian log-likelihood of a live window whose newest sample
+ * sits at global bin `endBin` (SYNTHESIS convergence pt. 1, FollowMe/MaLoc
+ * recipe). Differencing subsumes mean removal, cancels device hard-iron bias
+ * and mid-walk iOS recalibration steps, and is direction-sensitive: a reversed
+ * walk produces a reversed-and-negated difference sequence that does not match
+ * the forward profile, unlike the direction-symmetric raw magnitude.
+ * Returns per-point stats or null when the window does not fit.
  */
 function perPointLogLik(gp, live, endBin) {
   const L = live.length;
   if (endBin - L + 1 < 0 || endBin >= gp.bins) return null;
 
-  let liveMean = 0, profMean = 0;
-  for (let k = 0; k < L; k++) { liveMean += live[k]; profMean += gp.mean[endBin - L + 1 + k]; }
-  liveMean /= L; profMean /= L;
+  // Differences are taken at ONE STRIDE of lag (FollowMe differences at step
+  // scale): adjacent-bin deltas (~5 cm) are noise-dominated, stride-scale
+  // deltas carry the field structure. The lag mirrors the window provider's
+  // per-step resampling rate for this segment.
+  const lag = Math.max(2, Math.round(segmentOfBin(gp, endBin).binsPerStep));
+  if (L <= lag) return null;
 
+  // Single fitted difference noise (Magicol: one sigma per building). The
+  // per-bin survey std is NOT used here: adjacent-bin map errors are
+  // common-mode and cancel in differences, so summing them wildly
+  // overestimates the variance (verified: it floored the sigma fit).
+  const v = PARAMS.diffSigmaUT ** 2;
   let ll = 0;
   const residuals = [];
-  for (let k = 0; k < L; k++) {
+  for (let k = 0; k + lag < L; k++) {
     const idx = endBin - L + 1 + k;
-    const resid = (live[k] - liveMean) - (gp.mean[idx] - profMean);
-    const v = gp.std[idx] ** 2 + PARAMS.sensorSigmaUT ** 2;
+    const resid = (live[k + lag] - live[k]) - (gp.mean[idx + lag] - gp.mean[idx]);
     ll += -0.5 * (resid * resid / v + Math.log(2 * Math.PI * v));
     residuals.push(resid);
   }
-  return { perPoint: ll / L, residuals };
+  return { perPoint: ll / (L - lag), residuals };
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +288,12 @@ class RouteGridFilter {
         if (j < 0) {
           next[0] += share;                  // route start is a barrier
         } else if (j >= gp.bins) {
-          leaked += share;                   // stepping past the route end = off-route evidence
+          // Route end is a barrier too: a sharp posterior walking the last
+          // meters naturally overflows half a kernel, and leaking that to OFF
+          // blocked the final checkpoint once the differenced emission
+          // tightened tracking. Pacing-past-the-end is covered by turn
+          // anchors + reversal suppression now.
+          next[gp.bins - 1] += share;
         } else {
           next[j] += share;
         }
@@ -378,7 +395,7 @@ class RouteGridFilter {
         let liveMean = 0;
         for (const v of live) liveMean += v;
         liveMean /= L;
-        const v = this.gp.globalVar + PARAMS.sensorSigmaUT ** 2;
+        const v = this.gp.globalVar + PARAMS.diffSigmaUT ** 2;
         let ll = 0;
         for (const x of live) ll += -0.5 * (((x - liveMean) ** 2) / v + Math.log(2 * Math.PI * v));
         offLL = (ll / L) * PARAMS.obsIndependenceBins;
@@ -419,7 +436,10 @@ class RouteGridFilter {
         onRoute += this.belief[i];
         if (matches.some((turn) => Math.abs(i - turn.bin) <= 3 * turn.sigmaBins)) support += this.belief[i];
       }
+      this.lastTurnSupport = onRoute > 0 ? support / onRoute : 0;
       if (onRoute > 0 && support / onRoute < PARAMS.turnMatchMinSupport) matches = [];
+    } else {
+      this.lastTurnSupport = null;
     }
     if (!matches.length) {
       // A modest unmatched turn (doorway wiggle, hand adjustment) is
@@ -553,7 +573,7 @@ function metersMapper(session, gp) {
 
 /**
  * Newson-Krumm-style parameter fitting from a clean replay with ARKit truth:
- *   - sensorSigmaUT from the MAD of mean-removed residuals at the TRUE position
+ *   - diffSigmaUT from the MAD of mean-removed residuals at the TRUE position
  *   - offLogLikPerPoint as the median per-point log-likelihood at WRONG positions
  *     (>= 2 strides away from truth) — the calibrated OFF/mismatch level
  */
@@ -593,13 +613,14 @@ function calibrate(profile, session) {
 
   const absResiduals = matchedResiduals.map(Math.abs);
   const sigmaTotal = 1.4826 * median(absResiduals);
-  const meanMapVar = gp.std.reduce((a, b) => a + b * b, 0) / gp.std.length;
-  const sensorSigma = Math.sqrt(Math.max(0.25, sigmaTotal ** 2 - meanMapVar));
+  // Differenced emission: the fitted value IS the (single, homoscedastic)
+  // difference noise — no map-variance back-out.
+  const sensorSigma = Math.max(0.3, sigmaTotal);
 
   return {
     samples: { matched: matchedPerPoint.length, mismatched: mismatchPerPoint.length, residuals: matchedResiduals.length },
     sigmaTotal,
-    sensorSigmaUT: sensorSigma,
+    diffSigmaUT: sensorSigma,
     matchedPerPointMedian: median(matchedPerPoint),
     mismatchPerPointMedian: median(mismatchPerPoint),
   };
@@ -646,10 +667,25 @@ function replay(profile, session) {
   let observed = 0;
   let stepsSinceObservation = Infinity;
 
+  // Terminal region: within one stride of the route end. Once essentially all
+  // on-route mass is here, the magnetic emission has nothing left to
+  // discriminate — live windows start to include post-route field and would
+  // only blow up P(OFF), blocking the final checkpoint (live stops the filter
+  // at completion; replay must mirror that). Arrival itself was magnetically
+  // corroborated, so the freeze counts as observed for the recency gate.
+  // Two strides: the emission window spans several steps, so end-of-route
+  // mismatch starts polluting the likelihood while the mode is still a couple
+  // of strides from the final bin.
+  const terminalBin = gp.bins - 1 - Math.round(2 * gp.segments[gp.segments.length - 1].binsPerStep);
+  const inTerminal = () =>
+    filter.pOff < 0.5 && filter.probBeyond(terminalBin) / Math.max(1 - filter.pOff, 1e-9) > PARAMS.checkpointTau;
+
   for (const ev of events) {
     if (ev.kind === 'step') {
       filter.predictStep();
-      if (filter.observe(provider(ev.t))) {
+      if (inTerminal()) {
+        stepsSinceObservation = 0;
+      } else if (filter.observe(provider(ev.t))) {
         observed++;
         stepsSinceObservation = 0;
       } else {
@@ -661,7 +697,7 @@ function replay(profile, session) {
       // end-of-recording turn-around is not scored as evidence.
       if (checkpointStates.every((cp) => cp.firedAt !== null)) continue;
       const matched = filter.observeTurn(ev.deltaDeg);
-      turnLog.push({ t: ev.t, deltaDeg: ev.deltaDeg, matched, pOffAfter: filter.pOff });
+      turnLog.push({ t: ev.t, deltaDeg: ev.deltaDeg, matched, support: filter.lastTurnSupport, pOffAfter: filter.pOff });
     } else {
       const sinceStep = steps.length ? Math.min(...steps.map((s) => Math.abs(s - ev.t))) : Infinity;
       if (sinceStep > 1.5) filter.predictIdle(ev.t - lastT);
@@ -736,7 +772,8 @@ function scoreAndPrint(profile, session, r) {
   const signature = r.gp.turns.map((t) => `${t.deltaDeg > 0 ? '+' : ''}${t.deltaDeg}°@bin${t.bin}`).join(' ') || 'none';
   console.log(`Turn signature: ${signature}`);
   for (const turn of r.turnLog) {
-    console.log(`  turn ${rel(turn.t, timeline)} ${turn.deltaDeg > 0 ? '+' : ''}${turn.deltaDeg.toFixed(0)}° -> ${turn.matched ? 'MATCH (snap)' : 'unmatched'} · P(OFF) ${turn.pOffAfter.toFixed(2)}`);
+    const support = turn.support === null || turn.support === undefined ? '' : ` support ${(turn.support * 100).toFixed(0)}%`;
+    console.log(`  turn ${rel(turn.t, timeline)} ${turn.deltaDeg > 0 ? '+' : ''}${turn.deltaDeg.toFixed(0)}° -> ${turn.matched ? 'MATCH (snap)' : 'unmatched'}${support} · P(OFF) ${turn.pOffAfter.toFixed(2)}`);
   }
 
   // True meters error (clean passes with AR)
@@ -833,7 +870,7 @@ function main() {
     console.log(`Calibration from ${session.file}:`);
     console.log(`  residual samples: ${c.samples.residuals} (matched windows ${c.samples.matched}, mismatched ${c.samples.mismatched})`);
     console.log(`  total residual sigma (MAD-based): ${c.sigmaTotal.toFixed(2)} µT`);
-    console.log(`  -> fitted sensorSigmaUT: ${c.sensorSigmaUT.toFixed(2)}  (current PARAMS: ${PARAMS.sensorSigmaUT})`);
+    console.log(`  -> fitted diffSigmaUT: ${c.diffSigmaUT.toFixed(2)}  (current PARAMS: ${PARAMS.diffSigmaUT})`);
     console.log(`  per-point logLik at TRUE position (median): ${c.matchedPerPointMedian.toFixed(3)}`);
     console.log(`  per-point logLik at WRONG positions (median): ${c.mismatchPerPointMedian.toFixed(3)}`);
     console.log(`  -> fitted offLogLikPerPoint: ${c.mismatchPerPointMedian.toFixed(3)}  (current PARAMS: ${PARAMS.offLogLikPerPoint})`);

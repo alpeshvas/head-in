@@ -274,6 +274,20 @@ final class LivePositioningController {
             detectedSteps += 1
             stepTimes.append(timestamp)
             filter.predictStep()
+            // Terminal region (within two strides of the route end, holding
+            // essentially all on-route mass): the emission has nothing left to
+            // discriminate and live windows start to include post-route field,
+            // which would only blow up P(OFF) and block the final checkpoint.
+            // Arrival was magnetically corroborated, so it counts as observed.
+            let terminalBin = gp.bins - 1 - Int((2 * gp.segments[gp.segments.count - 1].binsPerStep).rounded())
+            let inTerminal = filter.pOff < 0.5
+                && filter.probBeyond(bin: terminalBin) / max(1 - filter.pOff, 1e-9) > FilterParams.checkpointTau
+            if inTerminal {
+                stepsSinceObservation = 0
+                lastWindowStatus = "terminal"
+                refreshOutputs(at: timestamp)
+                return
+            }
             // Freeze magnetic evidence when iOS reports the magnetometer uncalibrated
             // (e.g., right after a MagSafe attach); prediction still runs.
             var observedThisStep = false

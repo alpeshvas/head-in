@@ -9,10 +9,10 @@ import Foundation
 /// against the held-out Plumeria clean pass. Re-fit per venue/pose as data grows;
 /// offLogLikPerPoint is only valid for the sensorSigmaUT it was fitted under.
 enum FilterParams {
-    static let sensorSigmaUT = 1.5          // fitted
-    static let offLogLikPerPoint = -4.86    // fitted (valid for sensorSigmaUT 1.5)
+    static let diffSigmaUT = 2.42           // fitted: single homoscedastic first-difference noise (µT)
+    static let offLogLikPerPoint = -4.99    // fitted (valid for diffSigmaUT 2.42, windowSteps 6)
     static let minWindowRangeUT = 3.0
-    static let windowSteps = 4
+    static let windowSteps = 6
     static let stepNoiseFrac = 0.35
     static let kernelFloor = 1e-4
     static let obsIndependenceBins = 8.0
@@ -161,7 +161,12 @@ final class RouteBeliefFilter {
                 if j < 0 {
                     next[0] += share          // route start is a barrier
                 } else if j >= gp.bins {
-                    leaked += share           // stepping past the route end = off-route evidence
+                    // Route end is a barrier too: a sharp posterior walking the
+                    // last meters naturally overflows half a kernel; leaking it
+                    // to OFF blocked the final checkpoint once the differenced
+                    // emission tightened tracking. Pacing-past-the-end is
+                    // covered by turn anchors + reversal suppression.
+                    next[gp.bins - 1] += share
                 } else {
                     next[j] += share
                 }
@@ -293,30 +298,32 @@ final class RouteBeliefFilter {
         var windowCache: [Int: [Double]?] = [:]
         var anyWindow = false
 
+        // First-difference emission at ONE STRIDE of lag (SYNTHESIS convergence
+        // pt. 1, FollowMe/MaLoc): direction-sensitive, device-invariant, immune
+        // to mid-walk iOS recalibration, subsumes mean removal. Adjacent-bin
+        // deltas are noise-dominated; stride-scale deltas carry the structure.
+        // Single fitted homoscedastic difference noise (Magicol: one sigma per
+        // building) — the per-bin survey std is NOT used: adjacent-bin map
+        // errors are common-mode and cancel in differences.
+        let v = FilterParams.diffSigmaUT * FilterParams.diffSigmaUT
         for s in 0..<gp.bins {
             let seg = gp.segment(ofBin: s)
             if windowCache[seg.index] == nil { windowCache[seg.index] = windowForSegment(seg) }
             guard let live = windowCache[seg.index] ?? nil else { continue }
             let L = live.count
             guard s - L + 1 >= 0 else { continue }
-
-            var liveMean = 0.0
-            var profMean = 0.0
-            for k in 0..<L {
-                liveMean += live[k]
-                profMean += gp.mean[s - L + 1 + k]
-            }
-            liveMean /= Double(L)
-            profMean /= Double(L)
+            let lag = max(2, Int(seg.binsPerStep.rounded()))
+            guard L > lag else { continue }
 
             var ll = 0.0
-            for k in 0..<L {
+            var k = 0
+            while k + lag < L {
                 let idx = s - L + 1 + k
-                let resid = (live[k] - liveMean) - (gp.mean[idx] - profMean)
-                let v = gp.std[idx] * gp.std[idx] + FilterParams.sensorSigmaUT * FilterParams.sensorSigmaUT
+                let resid = (live[k + lag] - live[k]) - (gp.mean[idx + lag] - gp.mean[idx])
                 ll += -0.5 * (resid * resid / v + log(2 * Double.pi * v))
+                k += 1
             }
-            logLik[s] = (ll / Double(L)) * FilterParams.obsIndependenceBins
+            logLik[s] = (ll / Double(L - lag)) * FilterParams.obsIndependenceBins
             anyWindow = true
         }
         guard anyWindow else { return false }
