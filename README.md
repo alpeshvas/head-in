@@ -99,3 +99,4 @@ matcher still needs a live segment-state model.
 - No camera dependency.
 - Routes are single-floor. Floor detection is out of scope for v1.
 - Design for checkpoint or zone accuracy before promising a precise blue dot.
+- 
