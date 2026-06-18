@@ -15,6 +15,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const { buildArcLength, segmentGroundTruth } = require('./ground-truth');
+
+// Minimum tracking quality for AR ground truth to be trusted as the error reference.
+const MIN_AR_TRACKING_QUALITY = 0.6;
 
 const DEFAULT_WINDOW_POINTS = 28;
 const SEARCH_RADIUS = 0.18; // segment-progress fraction around the PDR prior
@@ -86,6 +90,7 @@ function parseSession(filePath) {
   const dm = [];
   const rawMag = [];
   const anchors = [];
+  const arPoses = [];
 
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -132,6 +137,17 @@ function parseSession(filePath) {
       case 'anchor_undo':
         undoAnchor(anchors, obj);
         break;
+      case 'arpose':
+        if (obj.p) {
+          const t = Number(obj.t);
+          const x = Number(obj.p.x);
+          const y = Number(obj.p.y);
+          const z = Number(obj.p.z);
+          if ([t, x, y, z].every(Number.isFinite)) {
+            arPoses.push({ t, x, y, z, tracking: String(obj.track || '') });
+          }
+        }
+        break;
       default:
         break;
     }
@@ -141,6 +157,7 @@ function parseSession(filePath) {
   anchors.sort((a, b) => a.t - b.t);
   dm.sort((a, b) => a.t - b.t);
   rawMag.sort((a, b) => a.t - b.t);
+  arPoses.sort((a, b) => a.t - b.t);
 
   const trace = dm.length > 0 ? dm : rawMag;
   if (trace.length === 0) throw new Error(`${filePath}: no dm.mag or raw magnetometer samples found`);
@@ -152,6 +169,8 @@ function parseSession(filePath) {
     trace,
     dm,
     anchors,
+    arPoses,
+    arc: arPoses.length >= 2 ? buildArcLength(arPoses) : null,
     calibrated: dm.length > 0,
   };
 }
@@ -344,21 +363,24 @@ function matchWindow(track, i, profileMean, windowSize) {
   return best.r === -Infinity ? null : best;
 }
 
-function buildTrack(validationSegment, steps) {
+function buildTrack(validationSegment, steps, groundTruth) {
   const startT = validationSegment.start.t;
   const endT = validationSegment.end.t;
+  const useAR = groundTruth && groundTruth.trackingQuality >= MIN_AR_TRACKING_QUALITY;
   return validationSegment.traceSamples.map((s) => ({
     t: s.t,
     mag: s.mag,
-    truth: clamp01((s.t - startT) / Math.max(endT - startT, 0.001)),
+    // True progress: real distance travelled (ARKit) when available and well-tracked,
+    // else the time-linear assumption (constant walking speed).
+    truth: useAR ? groundTruth.progressAt(s.t) : clamp01((s.t - startT) / Math.max(endT - startT, 0.001)),
     pdr: pdrProgressAt(s.t, startT, endT, steps),
   }));
 }
 
-function replayFingerprintSegment(profileSegment, validationSegment) {
+function replayFingerprintSegment(profileSegment, validationSegment, groundTruth) {
   const profileMean = profileSegment.magneticMagnitude.mean;
   const steps = detectSteps(validationSegment.stepSamples);
-  const track = buildTrack(validationSegment, steps);
+  const track = buildTrack(validationSegment, steps, groundTruth);
   const windowSize = chooseWindowSize(track.length, profileMean.length);
   const estimates = [];
 
@@ -380,6 +402,10 @@ function replayFingerprintSegment(profileSegment, validationSegment) {
   const avgCorrelation = matched.length ? matched.reduce((sum, r) => sum + r.correlation, 0) / matched.length : 0;
   const event = nearCheckpointEvent(estimates, profileSegment.to);
 
+  // True error in meters when ARKit ground truth backs the truth signal.
+  const useAR = groundTruth && groundTruth.trackingQuality >= MIN_AR_TRACKING_QUALITY;
+  const lengthMeters = useAR ? groundTruth.lengthMeters : null;
+
   return {
     kind: 'fingerprint',
     status: windowSize ? 'matched' : 'no_window',
@@ -387,6 +413,11 @@ function replayFingerprintSegment(profileSegment, validationSegment) {
     steps: steps.length,
     pdrMae,
     fusedMae,
+    truthSource: useAR ? 'arkit' : 'time',
+    lengthMeters,
+    arTrackingQuality: groundTruth ? groundTruth.trackingQuality : null,
+    pdrMaeMeters: lengthMeters != null ? pdrMae * lengthMeters : null,
+    fusedMaeMeters: lengthMeters != null ? fusedMae * lengthMeters : null,
     avgConfidence,
     avgCorrelation,
     finalPdr: estimates.length ? estimates[estimates.length - 1].pdr : 0,
@@ -466,11 +497,14 @@ function analyze(profile, session) {
   return profile.segments.map((profileSegment) => {
     const validationSegment = buildValidationSegment(session, profile, profileSegment, resolveAnchor);
     const isTransition = profileSegment.kind === 'transition' || profileSegment.useForMatching === false;
+    const groundTruth = validationSegment.ok && session.arc
+      ? segmentGroundTruth(session.arc, validationSegment.start.t, validationSegment.end.t)
+      : null;
     const result = !validationSegment.ok
       ? skippedResult(validationSegment.reason)
       : isTransition
         ? transitionResult(profileSegment, validationSegment)
-        : replayFingerprintSegment(profileSegment, validationSegment);
+        : replayFingerprintSegment(profileSegment, validationSegment, groundTruth);
 
     return {
       profileSegment,
@@ -540,6 +574,36 @@ function printReport(profile, session, rows) {
     const avgConf = matchedRows.reduce((sum, row) => sum + row.result.avgConfidence, 0) / matchedRows.length;
     console.log('-'.repeat(118));
     console.log(`Fingerprint averages: PDR MAE ${formatPercent(avgPdrMae)} segment, fused MAE ${formatPercent(avgFusedMae)} segment, confidence ${formatNumber(avgConf, 2)}`);
+
+    const arRows = matchedRows.filter((row) => row.result.truthSource === 'arkit');
+    if (arRows.length) {
+      console.log('');
+      console.log('TRUE error vs ARKit ground truth (meters):');
+      console.log('Segment'.padEnd(34) + 'Length m'.padEnd(10) + 'PDR m'.padEnd(9) + 'Fused m'.padEnd(9) + 'AR track');
+      console.log('-'.repeat(72));
+      let sumPdrM = 0;
+      let sumFusedM = 0;
+      let sumLen = 0;
+      for (const row of arRows) {
+        const r = row.result;
+        console.log(
+          row.label.slice(0, 32).padEnd(34) +
+          r.lengthMeters.toFixed(2).padEnd(10) +
+          r.pdrMaeMeters.toFixed(2).padEnd(9) +
+          r.fusedMaeMeters.toFixed(2).padEnd(9) +
+          `${(r.arTrackingQuality * 100).toFixed(0)}%`
+        );
+        sumPdrM += r.pdrMaeMeters;
+        sumFusedM += r.fusedMaeMeters;
+        sumLen += r.lengthMeters;
+      }
+      console.log('-'.repeat(72));
+      console.log(`Mean true error: PDR ${(sumPdrM / arRows.length).toFixed(2)} m, fused ${(sumFusedM / arRows.length).toFixed(2)} m  (over ${sumLen.toFixed(1)} m of matched route)`);
+    } else if (session.arPoses && session.arPoses.length >= 2) {
+      console.log('AR poses present but tracking quality below threshold; reported MAE is vs time-linear truth, not meters.');
+    } else {
+      console.log('No ARKit ground truth in this session; MAE is vs time-linear truth (assumes constant walking speed).');
+    }
   }
 }
 
