@@ -8,6 +8,8 @@
     "position": "node analysis/pdr-assisted-positioning.js",
     "build-profile": "node analysis/build-profile.js",
     "match": "node analysis/match-route.js",
+    "build-2d-heatmap": "node analysis/build-2d-heatmap.js",
+    "replay-2d": "node analysis/replay-2d-particle.js",
     "ground-truth": "node analysis/ground-truth.js",
     "parity-fixture": "node analysis/make-parity-fixture.js",
     "test": "cd survey-recorder && xcodegen generate && xcodebuild test -project SurveyRecorder.xcodeproj -scheme FilterParityTests -destination platform=macOS -derivedDataPath build -quiet"

@@ -13,3 +13,5 @@ analysis/*.html
 
 # Local build output
 build/
+
+.idea

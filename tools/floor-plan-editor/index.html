@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2D Venue Map Editor</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f3f4f6; color: #111827; }
+    main { display: grid; grid-template-columns: 320px 1fr; min-height: 100vh; }
+    aside { background: white; border-right: 1px solid #e5e7eb; padding: 18px; overflow: auto; }
+    canvas { display: block; width: 100%; height: 100vh; background: #fff; cursor: crosshair; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    h2 { font-size: 13px; margin: 20px 0 8px; text-transform: uppercase; letter-spacing: .08em; color: #6b7280; }
+    label { display: grid; gap: 5px; font-size: 12px; font-weight: 650; color: #374151; margin: 10px 0; }
+    input, select, button, textarea { font: inherit; }
+    input, textarea { border: 1px solid #d1d5db; border-radius: 9px; padding: 8px 9px; background: white; }
+    textarea { min-height: 130px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    button { border: 1px solid #d1d5db; background: white; border-radius: 10px; padding: 8px 10px; cursor: pointer; }
+    button:hover { background: #f9fafb; }
+    button.primary { background: #2563eb; border-color: #2563eb; color: white; }
+    button.primary:hover { background: #1d4ed8; }
+    button.active { background: #111827; color: white; border-color: #111827; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .tools { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .status { margin-top: 10px; font-size: 12px; color: #6b7280; line-height: 1.4; }
+    .list { font-size: 12px; color: #374151; line-height: 1.5; max-height: 160px; overflow: auto; border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px; background: #f9fafb; }
+    .hint { font-size: 12px; color: #6b7280; line-height: 1.45; }
+    @media (max-width: 860px) { main { grid-template-columns: 1fr; } canvas { height: 70vh; } }
+  </style>
+</head>
+<body>
+<main>
+  <aside>
+    <h1>2D Venue Map Editor</h1>
+    <p class="hint">Draw geometry in meters over an optional floor-plan image. Export JSON and bundle it in the iOS app.</p>
+
+    <h2>Venue</h2>
+    <label>Venue ID <input id="venueId" value="demo-gallery"></label>
+    <label>Name <input id="venueName" value="Demo Gallery"></label>
+    <div class="row">
+      <label>Width m <input id="widthMeters" type="number" step="0.1" value="24"></label>
+      <label>Height m <input id="heightMeters" type="number" step="0.1" value="16"></label>
+    </div>
+    <label>Floor plan image <input id="imageInput" type="file" accept="image/*"></label>
+
+    <h2>Draw</h2>
+    <div class="tools">
+      <button data-tool="walkable" class="active">Walkable</button>
+      <button data-tool="room">Room</button>
+      <button data-tool="wall">Wall</button>
+      <button data-tool="entrance">Entrance</button>
+      <button data-tool="alignment">Alignment</button>
+      <button id="undoPoint">Undo point</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="finishPolygon" class="primary">Finish polygon</button>
+      <button id="clearDraft">Clear draft</button>
+    </div>
+    <p id="status" class="status"></p>
+
+    <h2>Objects</h2>
+    <div id="objectList" class="list"></div>
+
+    <h2>Import / Export</h2>
+    <div class="row">
+      <button id="exportJson" class="primary">Export JSON</button>
+      <button id="downloadJson">Download JSON</button>
+    </div>
+    <button id="loadJson" style="width:100%; margin-top:8px">Load JSON from text</button>
+    <label>JSON <textarea id="jsonOut" spellcheck="false"></textarea></label>
+  </aside>
+  <canvas id="canvas"></canvas>
+</main>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const objectList = document.getElementById('objectList');
+const jsonOut = document.getElementById('jsonOut');
+
+const state = {
+  tool: 'walkable',
+  image: null,
+  imageFileName: null,
+  draft: [],
+  wallStart: null,
+  map: {
+    venueId: 'demo-gallery',
+    name: 'Demo Gallery',
+    widthMeters: 24,
+    heightMeters: 16,
+    image: null,
+    walkablePolygons: [],
+    walls: [],
+    rooms: [],
+    entrances: [],
+    alignmentPoints: []
+  }
+};
+
+function syncFormToMap() {
+  state.map.venueId = document.getElementById('venueId').value.trim() || 'venue';
+  state.map.name = document.getElementById('venueName').value.trim() || state.map.venueId;
+  state.map.widthMeters = Number(document.getElementById('widthMeters').value) || 1;
+  state.map.heightMeters = Number(document.getElementById('heightMeters').value) || 1;
+}
+
+function syncMapToForm() {
+  document.getElementById('venueId').value = state.map.venueId;
+  document.getElementById('venueName').value = state.map.name;
+  document.getElementById('widthMeters').value = state.map.widthMeters;
+  document.getElementById('heightMeters').value = state.map.heightMeters;
+}
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+  canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+function transform() {
+  syncFormToMap();
+  const rect = canvas.getBoundingClientRect();
+  const scale = Math.min(rect.width / state.map.widthMeters, rect.height / state.map.heightMeters);
+  return {
+    scale,
+    xOffset: (rect.width - state.map.widthMeters * scale) / 2,
+    yOffset: (rect.height - state.map.heightMeters * scale) / 2
+  };
+}
+
+function toCanvas(p) {
+  const t = transform();
+  return { x: t.xOffset + p.x * t.scale, y: t.yOffset + p.y * t.scale };
+}
+
+function toMap(x, y) {
+  const t = transform();
+  return {
+    x: round((x - t.xOffset) / t.scale),
+    y: round((y - t.yOffset) / t.scale)
+  };
+}
+
+function round(v) { return Math.round(v * 1000) / 1000; }
+function slug(s) { return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'item'; }
+
+function draw() {
+  const rect = canvas.getBoundingClientRect();
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  const t = transform();
+  const mapRect = { x: t.xOffset, y: t.yOffset, w: state.map.widthMeters * t.scale, h: state.map.heightMeters * t.scale };
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(mapRect.x, mapRect.y, mapRect.w, mapRect.h);
+  if (state.image) ctx.drawImage(state.image, mapRect.x, mapRect.y, mapRect.w, mapRect.h);
+  ctx.strokeStyle = '#111827';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mapRect.x, mapRect.y, mapRect.w, mapRect.h);
+
+  drawPolygons(state.map.walkablePolygons, 'rgba(34,197,94,.10)', 'rgba(34,197,94,.7)', null);
+  drawPolygons(state.map.rooms.map(r => r.polygon), 'rgba(59,130,246,.10)', 'rgba(37,99,235,.65)', state.map.rooms.map(r => r.name));
+  drawWalls();
+  drawPoints(state.map.entrances, '#2563eb', 'E');
+  drawPoints(state.map.alignmentPoints, '#9333ea', 'A');
+  drawDraft();
+  renderObjects();
+}
+
+function drawPolygons(polygons, fill, stroke, labels) {
+  polygons.forEach((polygon, idx) => {
+    if (!polygon.length) return;
+    ctx.beginPath();
+    const first = toCanvas(polygon[0]);
+    ctx.moveTo(first.x, first.y);
+    polygon.slice(1).forEach(p => { const c = toCanvas(p); ctx.lineTo(c.x, c.y); });
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2;
+    ctx.fill();
+    ctx.stroke();
+    if (labels && labels[idx]) {
+      const c = centroid(polygon);
+      const p = toCanvas(c);
+      ctx.fillStyle = '#111827';
+      ctx.font = '700 12px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText(labels[idx], p.x, p.y);
+    }
+  });
+}
+
+function drawWalls() {
+  ctx.strokeStyle = '#111827';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  state.map.walls.forEach(w => {
+    if (w.points.length < 2) return;
+    ctx.beginPath();
+    const first = toCanvas(w.points[0]);
+    ctx.moveTo(first.x, first.y);
+    w.points.slice(1).forEach(p => { const c = toCanvas(p); ctx.lineTo(c.x, c.y); });
+    ctx.stroke();
+  });
+  ctx.lineCap = 'butt';
+}
+
+function drawPoints(items, color, prefix) {
+  items.forEach(item => {
+    const p = toCanvas(item.point);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '700 10px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText(prefix, p.x, p.y + 3);
+    ctx.fillStyle = color;
+    ctx.textAlign = 'left';
+    ctx.fillText(item.name, p.x + 10, p.y + 4);
+  });
+}
+
+function drawDraft() {
+  if (!state.draft.length && !state.wallStart) return;
+  ctx.strokeStyle = '#ef4444';
+  ctx.fillStyle = '#ef4444';
+  ctx.lineWidth = 2;
+  const pts = state.wallStart ? [state.wallStart] : state.draft;
+  pts.forEach((point, idx) => {
+    const p = toCanvas(point);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    if (idx > 0) {
+      const prev = toCanvas(pts[idx - 1]);
+      ctx.beginPath();
+      ctx.moveTo(prev.x, prev.y);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+  });
+}
+
+function centroid(poly) {
+  return poly.reduce((acc, p) => ({ x: acc.x + p.x / poly.length, y: acc.y + p.y / poly.length }), { x: 0, y: 0 });
+}
+
+function renderObjects() {
+  objectList.innerHTML = [
+    `walkable polygons: ${state.map.walkablePolygons.length}`,
+    `rooms: ${state.map.rooms.map(r => r.name).join(', ') || '-'}`,
+    `walls: ${state.map.walls.length}`,
+    `entrances: ${state.map.entrances.map(e => e.name).join(', ') || '-'}`,
+    `alignment points: ${state.map.alignmentPoints.map(a => a.name).join(', ') || '-'}`
+  ].join('<br>');
+  statusEl.textContent = state.tool === 'wall'
+    ? 'Wall mode: click start and end points.'
+    : state.tool === 'entrance' || state.tool === 'alignment'
+      ? 'Point mode: click once, then name it.'
+      : 'Polygon mode: click vertices, then Finish polygon.';
+}
+
+canvas.addEventListener('click', event => {
+  const rect = canvas.getBoundingClientRect();
+  const point = toMap(event.clientX - rect.left, event.clientY - rect.top);
+  if (point.x < 0 || point.y < 0 || point.x > state.map.widthMeters || point.y > state.map.heightMeters) return;
+
+  if (state.tool === 'wall') {
+    if (!state.wallStart) state.wallStart = point;
+    else {
+      state.map.walls.push({ id: `wall-${state.map.walls.length + 1}`, points: [state.wallStart, point] });
+      state.wallStart = null;
+    }
+  } else if (state.tool === 'entrance') {
+    const name = prompt('Entrance name?', `Entrance ${state.map.entrances.length + 1}`);
+    if (name) state.map.entrances.push({ id: slug(name), name, point });
+  } else if (state.tool === 'alignment') {
+    const name = prompt('Alignment point name?', `Alignment ${state.map.alignmentPoints.length + 1}`);
+    if (name) state.map.alignmentPoints.push({ id: slug(`align-${name}`), name, point });
+  } else {
+    state.draft.push(point);
+  }
+  draw();
+});
+
+document.querySelectorAll('[data-tool]').forEach(button => {
+  button.addEventListener('click', () => {
+    state.tool = button.dataset.tool;
+    document.querySelectorAll('[data-tool]').forEach(b => b.classList.toggle('active', b === button));
+    state.draft = [];
+    state.wallStart = null;
+    draw();
+  });
+});
+
+document.getElementById('finishPolygon').addEventListener('click', () => {
+  if (state.draft.length < 3) { alert('Need at least 3 points.'); return; }
+  if (state.tool === 'room') {
+    const name = prompt('Room name?', `Room ${state.map.rooms.length + 1}`);
+    if (name) state.map.rooms.push({ id: slug(name), name, polygon: state.draft.slice() });
+  } else if (state.tool === 'walkable') {
+    state.map.walkablePolygons.push(state.draft.slice());
+  } else {
+    alert('Finish polygon is only for walkable/room tools.');
+  }
+  state.draft = [];
+  draw();
+});
+
+document.getElementById('undoPoint').addEventListener('click', () => { state.draft.pop(); draw(); });
+document.getElementById('clearDraft').addEventListener('click', () => { state.draft = []; state.wallStart = null; draw(); });
+
+document.getElementById('imageInput').addEventListener('change', event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => {
+    state.image = img;
+    state.imageFileName = file.name;
+    state.map.image = { fileName: file.name, widthPixels: img.naturalWidth, heightPixels: img.naturalHeight };
+    draw();
+  };
+  img.src = URL.createObjectURL(file);
+});
+
+document.getElementById('exportJson').addEventListener('click', () => {
+  jsonOut.value = exportedJson();
+});
+
+document.getElementById('downloadJson').addEventListener('click', () => {
+  const json = exportedJson();
+  jsonOut.value = json;
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${slug(state.map.venueId || 'venue-map')}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+
+function exportedJson() {
+  syncFormToMap();
+  if (state.map.rooms.length === 0) alert('No rooms drawn yet. Rooms are required for room-confidence output.');
+  if (state.map.entrances.length === 0) alert('No entrances marked yet. Runtime initialization needs at least one.');
+  if (state.map.alignmentPoints.length < 2) alert('Add at least two alignment points for ARKit survey alignment.');
+  return JSON.stringify({ schema: 1, map: state.map, heatmapCells: [] }, null, 2);
+}
+
+document.getElementById('loadJson').addEventListener('click', () => {
+  try {
+    const parsed = JSON.parse(jsonOut.value);
+    if (parsed.schema !== 1 || !parsed.map) throw new Error('Expected schema 1 venue-map package.');
+    state.map = parsed.map;
+    state.draft = [];
+    state.wallStart = null;
+    syncMapToForm();
+    draw();
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+['venueId', 'venueName', 'widthMeters', 'heightMeters'].forEach(id => {
+  document.getElementById(id).addEventListener('input', draw);
+});
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+</script>
+</body>
+</html>

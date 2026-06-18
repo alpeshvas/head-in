@@ -9,6 +9,8 @@ struct SurveyRecorderApp: App {
                     .tabItem { Label("Survey", systemImage: "record.circle") }
                 NavigationStack { LivePositioningView() }
                     .tabItem { Label("Live", systemImage: "location.north.circle") }
+                NavigationStack { MapHeatmapView() }
+                    .tabItem { Label("Map", systemImage: "map") }
                 NavigationStack { SessionsView() }
                     .tabItem { Label("Sessions", systemImage: "tray.full") }
             }
