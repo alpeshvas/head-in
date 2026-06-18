@@ -601,6 +601,104 @@ function buildTurnSignature(filePaths, profile, splicedLines = new Map()) {
   return signature.sort((a, b) => a.bin - b.bin);
 }
 
+/**
+ * Per-venue emission calibration (Newson-Krumm: fit noise parameters from
+ * replays, per venue). Leave-one-out: each input pass is evaluated against a
+ * profile built from the OTHER passes (in-sample when only one pass exists —
+ * flagged in `method`). Truth comes from ARKit arc length when the pass
+ * recorded it, else linear time interpolation between anchors. Two-phase fit:
+ * diffSigmaUT from the MAD of difference residuals at the true position
+ * (sigma-independent), then offLogLikPerPoint as the median per-point
+ * log-likelihood at WRONG positions computed under the fitted sigma.
+ */
+function fitCalibration(files, splicedLines, sessions) {
+  const gfModule = require('./grid-filter');
+  const evals = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const evalSession = gfModule.parseSession(files[i], splicedLines.get(files[i]));
+    if (evalSession.anchors.length < 2) continue;
+
+    const others = sessions.filter((_, j) => j !== i);
+    const looProfile = others.length > 0 ? buildProfile(others) : buildProfile(sessions);
+    if (!looProfile.segments.length) continue;
+    const gp = gfModule.buildGlobalProfile(looProfile);
+
+    let truthBinAt = null;
+    const tracked = evalSession.arPoses.filter((p) => p.tracking === 'normal').length;
+    if (tracked > 50) {
+      try {
+        const mm = gfModule.metersMapper(evalSession, gp);
+        if (mm) truthBinAt = (t) => mm.metersToBin(mm.truthMetersAt(t));
+      } catch { truthBinAt = null; }
+    }
+    if (!truthBinAt) {
+      const anchors = evalSession.anchors;
+      truthBinAt = (t) => {
+        for (let a = 0; a + 1 < anchors.length; a++) {
+          if (t >= anchors[a].t && t < anchors[a + 1].t) {
+            const seg = gp.segments.find((s) => s.from === anchors[a].name && s.to === anchors[a + 1].name);
+            if (!seg) return null;
+            const f = (t - anchors[a].t) / (anchors[a + 1].t - anchors[a].t);
+            return seg.startBin + f * (seg.count - 1);
+          }
+        }
+        return null;
+      };
+    }
+
+    evals.push({ session: evalSession, gp, truthBinAt, inSample: others.length === 0, hasGT: tracked > 50 });
+  }
+  if (!evals.length) return null;
+
+  // Phase 1: difference residuals at truth (sigma-independent).
+  const residuals = [];
+  const wrongSites = []; // kept for phase 2 re-evaluation under fitted sigma
+  for (const ev of evals) {
+    const steps = gfModule.detectSteps(ev.session.dm);
+    const provider = gfModule.makeWindowProvider(ev.session.dm, steps);
+    for (const t of steps) {
+      const tb = ev.truthBinAt(t);
+      if (tb === null || !Number.isFinite(tb)) continue;
+      const trueBin = Math.min(Math.max(Math.round(tb), 0), ev.gp.bins - 1);
+      const liveFor = provider(t);
+      const seg = gfModule.segmentOfBin(ev.gp, trueBin);
+      const live = liveFor(seg);
+      if (!live) continue;
+      const atTruth = gfModule.perPointLogLik(ev.gp, live, trueBin);
+      if (atTruth) residuals.push(...atTruth.residuals);
+      const stride = seg.binsPerStep;
+      for (let s = live.length - 1; s < ev.gp.bins; s += 17) {
+        if (Math.abs(s - trueBin) < 2 * stride) continue;
+        const wrongSeg = gfModule.segmentOfBin(ev.gp, s);
+        const wrongLive = liveFor(wrongSeg);
+        if (wrongLive) wrongSites.push({ gp: ev.gp, live: wrongLive, s });
+      }
+    }
+  }
+  if (residuals.length < 200 || wrongSites.length < 200) return null;
+
+  const absResiduals = residuals.map(Math.abs).sort((a, b) => a - b);
+  const mad = absResiduals[Math.floor(absResiduals.length / 2)];
+  const diffSigmaUT = Math.max(0.5, 1.4826 * mad);
+
+  // Phase 2: wrong-position level under the fitted sigma.
+  const wrongLL = wrongSites
+    .map((w) => gfModule.perPointLogLik(w.gp, w.live, w.s, diffSigmaUT))
+    .filter(Boolean)
+    .map((stats) => stats.perPoint)
+    .sort((a, b) => a - b);
+  const offLogLikPerPoint = wrongLL[Math.floor(wrongLL.length / 2)];
+
+  return {
+    diffSigmaUT: round(diffSigmaUT, 3),
+    offLogLikPerPoint: round(offLogLikPerPoint, 3),
+    method: evals.some((e) => e.inSample) ? 'in-sample' : 'leave-one-out',
+    truth: evals.every((e) => e.hasGT) ? 'arkit' : 'anchor-interpolated',
+    passes: evals.length,
+  };
+}
+
 function printSessionSummary(sessions) {
   for (const session of sessions) {
     const magNote = session.calibratedMagnetic ? 'calibrated dm.mag' : 'RAW mag fallback';
@@ -676,6 +774,14 @@ function main() {
   printSegmentTable(profile.segments);
 
   profile.turns = buildTurnSignature(args.files, profile, splicedLines);
+  profile.calibration = fitCalibration(args.files, splicedLines, sessions);
+  if (profile.calibration) {
+    const c = profile.calibration;
+    console.log(`Calibration: diffSigmaUT=${c.diffSigmaUT} offLogLikPerPoint=${c.offLogLikPerPoint} (${c.method}, ${c.truth}, ${c.passes} passes)`);
+  } else {
+    profile.calibration = undefined;
+    console.warn('Calibration: insufficient data — filters will fall back to global constants.');
+  }
   console.log(
     profile.turns.length
       ? `\nTurn signature: ${profile.turns.map((t) => `${t.deltaDeg > 0 ? '+' : ''}${t.deltaDeg}°@bin${t.bin}±${t.sigmaBins} (${t.passes}p)`).join('  ')}`

@@ -7,6 +7,9 @@ struct RouteProfile: Decodable {
     let segments: [RouteSegment]
     /// Phase-3 turn signature (optional: older profiles predate it).
     let turns: [RouteTurn]?
+    /// Per-venue emission calibration fitted by build-profile (optional:
+    /// older profiles fall back to the FilterParams constants).
+    let calibration: ProfileCalibration?
     /// Bundle resource this profile was loaded from (set after decode, not JSON).
     var sourceResource: String?
 
@@ -90,6 +93,13 @@ struct RouteSegment: Decodable, Identifiable {
 
 struct ProfileStatistic: Decodable {
     let median: Double?
+}
+
+/// Per-venue emission noise parameters, fitted from the survey passes
+/// (Newson-Krumm recipe) by analysis/build-profile.js.
+struct ProfileCalibration: Decodable {
+    let diffSigmaUT: Double
+    let offLogLikPerPoint: Double
 }
 
 /// A turn the route reliably contains: signed heading change (degrees,

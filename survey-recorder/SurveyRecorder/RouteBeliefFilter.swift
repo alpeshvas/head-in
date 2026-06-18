@@ -57,6 +57,9 @@ struct GlobalRouteProfile {
     /// are not a single unreachable boundary bin).
     let checkpoints: [(name: String, bin: Int, decisionBin: Int)]
     let turns: [RouteTurn]
+    /// Per-venue emission calibration (profile-carried; FilterParams fallback).
+    let diffSigmaUT: Double
+    let offLogLikPerPoint: Double
     let bins: Int
 
     init(profile: RouteProfile) throws {
@@ -98,6 +101,8 @@ struct GlobalRouteProfile {
         }
         self.checkpoints = checkpoints
         self.turns = profile.turns ?? []
+        self.diffSigmaUT = profile.calibration?.diffSigmaUT ?? FilterParams.diffSigmaUT
+        self.offLogLikPerPoint = profile.calibration?.offLogLikPerPoint ?? FilterParams.offLogLikPerPoint
     }
 
     func segment(ofBin bin: Int) -> Segment {
@@ -334,7 +339,7 @@ final class RouteBeliefFilter {
         // Single fitted homoscedastic difference noise (Magicol: one sigma per
         // building) — the per-bin survey std is NOT used: adjacent-bin map
         // errors are common-mode and cancel in differences.
-        let v = FilterParams.diffSigmaUT * FilterParams.diffSigmaUT
+        let v = gp.diffSigmaUT * gp.diffSigmaUT
         for s in 0..<gp.bins {
             let seg = gp.segment(ofBin: s)
             if windowCache[seg.index] == nil { windowCache[seg.index] = windowForSegment(seg) }
@@ -357,7 +362,7 @@ final class RouteBeliefFilter {
         }
         guard anyWindow else { return false }
 
-        let offLL = FilterParams.offLogLikPerPoint * FilterParams.obsIndependenceBins
+        let offLL = gp.offLogLikPerPoint * FilterParams.obsIndependenceBins
         var maxLL = offLL
         for ll in logLik where ll.isFinite && ll > maxLL { maxLL = ll }
         for s in 0..<gp.bins where logLik[s].isFinite {

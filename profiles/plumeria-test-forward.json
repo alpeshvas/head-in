@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "createdAtUnix": 1781159105,
+  "createdAtUnix": 1781253977,
   "route": {
     "venueId": "Plumeria",
     "routeId": "Test",
@@ -1566,5 +1566,12 @@
       "sigmaBins": 18,
       "passes": 3
     }
-  ]
+  ],
+  "calibration": {
+    "diffSigmaUT": 2.556,
+    "offLogLikPerPoint": -4.863,
+    "method": "leave-one-out",
+    "truth": "arkit",
+    "passes": 3
+  }
 }

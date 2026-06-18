@@ -84,8 +84,8 @@ const PARAMS = {
 // ---------------------------------------------------------------------------
 // Session parsing (magnetic + user-acceleration + anchors + AR poses)
 
-function parseSession(filePath) {
-  const lines = fs.readFileSync(filePath, 'utf8').split('\n');
+function parseSession(filePath, providedLines) {
+  const lines = providedLines ?? fs.readFileSync(filePath, 'utf8').split('\n');
   let meta = null;
   const dm = [];
   const anchors = [];
@@ -198,7 +198,15 @@ function buildGlobalProfile(profile) {
   const globalVar = mean.reduce((a, b) => a + (b - globalMean) ** 2, 0) / mean.length;
 
   const turns = Array.isArray(profile.turns) ? profile.turns : [];
-  return { mean, std, segments, anchorBins, bins: mean.length, globalMean, globalVar, turns };
+  // Per-venue emission calibration carried in the profile (Newson-Krumm: fit
+  // every noise parameter from replays, re-fit per venue). PARAMS values are
+  // the fallback for profiles that predate the field.
+  const cal = profile.calibration || {};
+  return {
+    mean, std, segments, anchorBins, bins: mean.length, globalMean, globalVar, turns,
+    diffSigmaUT: Number.isFinite(cal.diffSigmaUT) ? cal.diffSigmaUT : PARAMS.diffSigmaUT,
+    offLogLikPerPoint: Number.isFinite(cal.offLogLikPerPoint) ? cal.offLogLikPerPoint : PARAMS.offLogLikPerPoint,
+  };
 }
 
 function segmentOfBin(gp, bin) {
@@ -217,7 +225,7 @@ function segmentOfBin(gp, bin) {
  * the forward profile, unlike the direction-symmetric raw magnitude.
  * Returns per-point stats or null when the window does not fit.
  */
-function perPointLogLik(gp, live, endBin) {
+function perPointLogLik(gp, live, endBin, sigmaOverride) {
   const L = live.length;
   if (endBin - L + 1 < 0 || endBin >= gp.bins) return null;
 
@@ -228,11 +236,13 @@ function perPointLogLik(gp, live, endBin) {
   const lag = Math.max(2, Math.round(segmentOfBin(gp, endBin).binsPerStep));
   if (L <= lag) return null;
 
-  // Single fitted difference noise (Magicol: one sigma per building). The
-  // per-bin survey std is NOT used here: adjacent-bin map errors are
-  // common-mode and cancel in differences, so summing them wildly
-  // overestimates the variance (verified: it floored the sigma fit).
-  const v = PARAMS.diffSigmaUT ** 2;
+  // Single fitted difference noise (Magicol: one sigma per building), per
+  // venue via the profile. The per-bin survey std is NOT used here:
+  // adjacent-bin map errors are common-mode and cancel in differences, so
+  // summing them wildly overestimates the variance (verified: it floored the
+  // sigma fit).
+  const sigma = sigmaOverride ?? gp.diffSigmaUT;
+  const v = sigma * sigma;
   let ll = 0;
   const residuals = [];
   for (let k = 0; k + lag < L; k++) {
@@ -415,8 +425,8 @@ class RouteGridFilter {
 
     // OFF model: calibrated mismatch level when fitted, else a structureless field.
     let offLL = NaN;
-    if (PARAMS.offLogLikPerPoint !== null) {
-      offLL = PARAMS.offLogLikPerPoint * PARAMS.obsIndependenceBins;
+    if (this.gp.offLogLikPerPoint !== null) {
+      offLL = this.gp.offLogLikPerPoint * PARAMS.obsIndependenceBins;
     } else {
       for (const live of windowCache.values()) {
         if (!live) continue;
@@ -921,7 +931,7 @@ function main() {
   }
 }
 
-module.exports = { buildGlobalProfile, RouteGridFilter, replay, calibrate, PARAMS, parseSession, detectSteps, makeWindowProvider, segmentOfBin };
+module.exports = { buildGlobalProfile, RouteGridFilter, replay, calibrate, PARAMS, parseSession, detectSteps, makeWindowProvider, segmentOfBin, perPointLogLik, metersMapper };
 
 if (require.main === module) {
   main();
