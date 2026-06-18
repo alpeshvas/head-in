@@ -17,6 +17,7 @@ struct RouteProfile: Decodable {
     /// Bundled route profiles available in this build, in display order.
     static let bundledProfiles: [(label: String, resource: String)] = [
         ("Plumeria", "plumeria-test-forward"),
+        ("Plumeria L478", "plumeria-l478-forward"),
         ("Meadows", "meadows-test-forward"),
     ]
 
