@@ -9,7 +9,8 @@
     "build-profile": "node analysis/build-profile.js",
     "match": "node analysis/match-route.js",
     "ground-truth": "node analysis/ground-truth.js",
-    "test": "echo \"No tests configured yet\""
+    "parity-fixture": "node analysis/make-parity-fixture.js",
+    "test": "cd survey-recorder && xcodegen generate && xcodebuild test -project SurveyRecorder.xcodeproj -scheme FilterParityTests -destination platform=macOS -derivedDataPath build -quiet"
   },
   "keywords": [
     "indoor-positioning",

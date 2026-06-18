@@ -825,7 +825,7 @@ function main() {
   }
 }
 
-module.exports = { buildGlobalProfile, RouteGridFilter, replay, calibrate, PARAMS };
+module.exports = { buildGlobalProfile, RouteGridFilter, replay, calibrate, PARAMS, parseSession, detectSteps, makeWindowProvider, segmentOfBin };
 
 if (require.main === module) {
   main();

@@ -5,7 +5,35 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 
+schemes:
+  FilterParityTests:
+    build:
+      targets:
+        FilterParityTests: all
+    test:
+      targets:
+        - FilterParityTests
+
 targets:
+  # JS<->Swift filter parity (macOS so it runs without a simulator; the filter
+  # sources are pure Foundation). Regenerate fixtures with
+  # analysis/make-parity-fixture.js whenever filter math changes on either side.
+  FilterParityTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: SurveyRecorder/RouteBeliefFilter.swift
+      - path: SurveyRecorder/RouteProfile.swift
+      - path: Tests/FilterParityTests.swift
+      - path: Tests/Fixtures
+        buildPhase: resources
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: true
+
   SurveyRecorder:
     type: application
     platform: iOS
