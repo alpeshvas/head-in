@@ -19,8 +19,8 @@ const PARAMS = {
   mergeGapS: 0.5,          // contiguous turning regions closer than this merge
 };
 
-function parseSession(filePath) {
-  const lines = fs.readFileSync(filePath, 'utf8').split('\n');
+function parseSession(filePath, providedLines) {
+  const lines = providedLines ?? fs.readFileSync(filePath, 'utf8').split('\n');
   let meta = null;
   const dm = [];
   const anchors = [];

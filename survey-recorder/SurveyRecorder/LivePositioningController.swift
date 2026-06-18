@@ -14,6 +14,12 @@ final class LivePositioningController {
 
     let deviceMotionAvailable: Bool
 
+    /// Carry pose for this live run, user-selected (the runtime cannot yet
+    /// detect pocketing). Turn evidence is hand-only: leg-swing distorts
+    /// pocket turn magnitudes and every pocket OFF injection in replays
+    /// traced back to a real route turn.
+    var livePose = DevicePose.hand
+
     private(set) var isRunning = false
     private(set) var isComplete = false
     private(set) var statusText = "Ready"
@@ -149,7 +155,7 @@ final class LivePositioningController {
             routeId: profile.route.routeId,
             floorId: profile.route.floorId ?? "",
             direction: Direction(rawValue: profile.route.direction) ?? .forward,
-            devicePose: .hand,
+            devicePose: livePose,
             passType: .live,
             recordGroundTruth: false,
             checkpoints: profile.anchors.map(\.name)
@@ -244,7 +250,7 @@ final class LivePositioningController {
         // on every sample; a closed turn region becomes a filter observation.
         let g = motion.gravity
         let gravityMagnitude = hypot3(g.x, g.y, g.z)
-        if gravityMagnitude > 0 {
+        if livePose == .hand, gravityMagnitude > 0 {
             let yawRate = -(rotation.x * g.x + rotation.y * g.y + rotation.z * g.z) / gravityMagnitude
             if let turn = turnDetector.addSample(t: timestamp, yawRate: yawRate) {
                 let matched = filter.observeTurn(deltaDeg: turn.deltaDeg)

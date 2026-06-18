@@ -18,6 +18,7 @@ struct RouteProfile: Decodable {
     static let bundledProfiles: [(label: String, resource: String)] = [
         ("Plumeria", "plumeria-test-forward"),
         ("Plumeria L478", "plumeria-l478-forward"),
+        ("Plumeria L478 (pocket)", "plumeria-l478-pocket"),
         ("Meadows", "meadows-test-forward"),
     ]
 

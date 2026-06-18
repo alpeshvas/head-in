@@ -641,7 +641,13 @@ function replay(profile, session) {
   for (let t = t0; t <= tEnd; t += 1.0) events.push({ t, kind: 'tick' });
   // Turn events fire when the turning region ends — the earliest a live
   // detector could emit them.
-  const turns = session.dm.some((s) => Number.isFinite(s.yawRate)) ? detectTurns(session.dm) : [];
+  // Turn evidence is hand-pose-only: leg-swing distorts pocket turn magnitudes
+  // (~30-40% compression) and misplaces signature localization — every OFF
+  // injection in pocket replays traced back to a REAL route turn.
+  const turnEvidenceEnabled = (session.meta.devicePose ?? 'hand') === 'hand';
+  const turns = turnEvidenceEnabled && session.dm.some((s) => Number.isFinite(s.yawRate))
+    ? detectTurns(session.dm)
+    : [];
   for (const turn of turns) events.push({ t: turn.endT, kind: 'turn', deltaDeg: turn.deltaDeg });
   events.sort((a, b) => a.t - b.t);
 
@@ -770,7 +776,8 @@ function scoreAndPrint(profile, session, r) {
 
   // Turn anchors
   const signature = r.gp.turns.map((t) => `${t.deltaDeg > 0 ? '+' : ''}${t.deltaDeg}°@bin${t.bin}`).join(' ') || 'none';
-  console.log(`Turn signature: ${signature}`);
+  const poseNote = (session.meta.devicePose ?? 'hand') === 'hand' ? '' : ` (turn evidence DISABLED: ${session.meta.devicePose} pose)`;
+  console.log(`Turn signature: ${signature}${poseNote}`);
   for (const turn of r.turnLog) {
     const support = turn.support === null || turn.support === undefined ? '' : ` support ${(turn.support * 100).toFixed(0)}%`;
     console.log(`  turn ${rel(turn.t, timeline)} ${turn.deltaDeg > 0 ? '+' : ''}${turn.deltaDeg.toFixed(0)}° -> ${turn.matched ? 'MATCH (snap)' : 'unmatched'}${support} · P(OFF) ${turn.pOffAfter.toFixed(2)}`);

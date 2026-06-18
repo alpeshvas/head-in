@@ -221,6 +221,18 @@ private struct LivePositioningContent: View {
     private var controlsCard: some View {
         card {
             VStack(spacing: 10) {
+                // Carry pose, user-selected: the runtime cannot yet detect
+                // pocketing, and turn evidence must be off in pocket.
+                Picker("Carry", selection: Binding(
+                    get: { controller.livePose },
+                    set: { controller.livePose = $0 }
+                )) {
+                    Text("Hand").tag(DevicePose.hand)
+                    Text("Pocket").tag(DevicePose.pocket)
+                }
+                .pickerStyle(.segmented)
+                .disabled(controller.isRunning)
+
                 Button {
                     controller.startOrReset()
                 } label: {

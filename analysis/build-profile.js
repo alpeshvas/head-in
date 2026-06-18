@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const turnEvents = require('./turn-events');
 const { buildArcLength } = require('./ground-truth');
+const { spliceSession } = require('./splice-pauses');
 
 const RESAMPLE_POINTS = 240;
 const TURN_CLUSTER_GAP_BINS = 80;
@@ -23,9 +24,10 @@ const MIN_STEP_INTERVAL_S = 0.34;
 
 function usage(exitCode = 1) {
   const msg = [
-    'Usage: node analysis/build-profile.js <session.jsonl...> --out profiles/<name>.json',
+    'Usage: node analysis/build-profile.js <session.jsonl...> --out profiles/<name>.json [--splice-pauses]',
     '',
     'Builds a route fingerprint profile from repeated survey sessions.',
+    '--splice-pauses: remove standing pauses first (pocket survey protocol).',
   ].join('\n');
   if (exitCode === 0) console.log(msg);
   else console.error(msg);
@@ -35,6 +37,7 @@ function usage(exitCode = 1) {
 function parseArgs(argv) {
   const files = [];
   let out = null;
+  let splicePauses = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -42,6 +45,8 @@ function parseArgs(argv) {
     else if (arg === '--out') {
       if (i + 1 >= argv.length) throw new Error('--out requires a path');
       out = argv[++i];
+    } else if (arg === '--splice-pauses') {
+      splicePauses = true;
     } else if (arg.startsWith('--')) {
       throw new Error(`Unknown option: ${arg}`);
     } else {
@@ -49,7 +54,7 @@ function parseArgs(argv) {
     }
   }
 
-  return { files, out };
+  return { files, out, splicePauses };
 }
 
 function isFiniteNumber(value) {
@@ -70,8 +75,8 @@ function removeMostRecentAnchor(anchors, index) {
   }
 }
 
-function parseSession(filePath) {
-  const lines = fs.readFileSync(filePath, 'utf8').split('\n');
+function parseSession(filePath, providedLines) {
+  const lines = providedLines ?? fs.readFileSync(filePath, 'utf8').split('\n');
   let meta = null;
   const dmMag = [];
   const dmUa = [];
@@ -527,7 +532,7 @@ function buildProfile(sessions) {
  * when the pass recorded ground truth (time fraction is a poor localizer:
  * walking slows mid-turn), falling back to time fraction otherwise.
  */
-function buildTurnSignature(filePaths, profile) {
+function buildTurnSignature(filePaths, profile, splicedLines = new Map()) {
   const startBins = new Map();
   let acc = 0;
   for (const seg of profile.segments) {
@@ -537,7 +542,7 @@ function buildTurnSignature(filePaths, profile) {
 
   const perPass = [];
   for (const filePath of filePaths) {
-    const session = turnEvents.parseSession(filePath);
+    const session = turnEvents.parseSession(filePath, splicedLines.get(filePath));
     const anchors = session.anchors;
     let arc = null;
     if (session.arPoses.filter((p) => p.tracking === 'normal').length > 50) {
@@ -647,7 +652,19 @@ function main() {
 
   if (args.files.length === 0 || !args.out) usage(1);
 
-  const sessions = args.files.map(parseSession);
+  // Pocket surveys pause at checkpoints instead of tapping; pauses become
+  // flat-field bin stretches in time-resampled profiles (attractors under the
+  // differenced emission), so splice them out before building.
+  const splicedLines = new Map();
+  if (args.splicePauses) {
+    for (const file of args.files) {
+      const result = spliceSession(file);
+      splicedLines.set(file, result.lines);
+      console.log(`${path.basename(file)}: spliced out ${result.pauses.length} pauses (${result.removedSeconds.toFixed(1)}s)`);
+    }
+    console.log('');
+  }
+  const sessions = args.files.map((f) => parseSession(f, splicedLines.get(f)));
   warnOnMixedRouteMetadata(sessions);
   printSessionSummary(sessions);
 
@@ -658,7 +675,7 @@ function main() {
 
   printSegmentTable(profile.segments);
 
-  profile.turns = buildTurnSignature(args.files, profile);
+  profile.turns = buildTurnSignature(args.files, profile, splicedLines);
   console.log(
     profile.turns.length
       ? `\nTurn signature: ${profile.turns.map((t) => `${t.deltaDeg > 0 ? '+' : ''}${t.deltaDeg}°@bin${t.bin}±${t.sigmaBins} (${t.passes}p)`).join('  ')}`

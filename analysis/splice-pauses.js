@@ -11,17 +11,10 @@
 
 const fs = require('fs');
 
-function main() {
-  const [src, dst] = process.argv.slice(2);
-  if (!dst) {
-    console.error('usage: node analysis/splice-pauses.js <session.jsonl> <out.jsonl> [--th 0.08]');
-    process.exit(1);
-  }
-  const thArg = process.argv.indexOf('--th');
-  const TH = thArg > 0 ? parseFloat(process.argv[thArg + 1]) : 0.08;
+/** Splice pauses out of a session file; returns { lines, pauses, removedSeconds }. */
+function spliceSession(srcPath, TH = 0.08) {
   const MIN_PAUSE_S = 0.7;
-
-  const lines = fs.readFileSync(src, 'utf8').trim().split('\n');
+  const lines = fs.readFileSync(srcPath, 'utf8').trim().split('\n');
   const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } });
   const dm = parsed.filter((o) => o && o.type === 'dm' && o.ua)
     .map((o) => ({ t: o.t, ua: Math.hypot(o.ua.x, o.ua.y, o.ua.z) }));
@@ -74,9 +67,20 @@ function main() {
     if (insidePause(o.t)) { dropped++; continue; }
     out.push(JSON.stringify({ ...o, t: splice(o.t) }));
   }
-  fs.writeFileSync(dst, out.join('\n') + '\n');
-  const removedTotal = pauses.reduce((a, p) => a + (p.b - p.a), 0);
-  console.log(`${dst}: removed ${pauses.length} pauses (${removedTotal.toFixed(1)}s, ${dropped} samples)`);
+  const removedSeconds = pauses.reduce((a, p) => a + (p.b - p.a), 0);
+  return { lines: out, pauses, removedSeconds, droppedSamples: dropped };
 }
 
-main();
+module.exports = { spliceSession };
+
+if (require.main === module) {
+  const [src, dst] = process.argv.slice(2);
+  if (!dst) {
+    console.error('usage: node analysis/splice-pauses.js <session.jsonl> <out.jsonl> [--th 0.08]');
+    process.exit(1);
+  }
+  const thArg = process.argv.indexOf('--th');
+  const result = spliceSession(src, thArg > 0 ? parseFloat(process.argv[thArg + 1]) : 0.08);
+  fs.writeFileSync(dst, result.lines.join('\n') + '\n');
+  console.log(`${dst}: removed ${result.pauses.length} pauses (${result.removedSeconds.toFixed(1)}s, ${result.droppedSamples} samples)`);
+}
