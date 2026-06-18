@@ -35,7 +35,7 @@ final class SessionWriter {
 
         // Sensor callbacks report time since boot; this offset maps them back to wall clock.
         let bootToUnixOffset = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
-        writeLine([
+        var meta: [String: Any] = [
             "type": "meta",
             "schema": 2,
             "venueId": setup.venueId,
@@ -50,7 +50,11 @@ final class SessionWriter {
             "systemVersion": ProcessInfo.processInfo.operatingSystemVersionString,
             "startedAtUnix": Date().timeIntervalSince1970,
             "bootToUnixOffset": bootToUnixOffset,
-        ])
+        ]
+        if let profileResource = setup.profileResource {
+            meta["profileResource"] = profileResource
+        }
+        writeLine(meta)
     }
 
     func writeLine(_ object: [String: Any]) {

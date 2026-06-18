@@ -158,7 +158,8 @@ final class LivePositioningController {
             devicePose: livePose,
             passType: .live,
             recordGroundTruth: false,
-            checkpoints: profile.anchors.map(\.name)
+            checkpoints: profile.anchors.map(\.name),
+            profileResource: profile.sourceResource
         ))
 
         recorder.start()

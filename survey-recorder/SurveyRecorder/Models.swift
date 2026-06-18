@@ -56,6 +56,9 @@ struct RouteSetup {
     /// never part of the shipped runtime experience.
     var recordGroundTruth: Bool
     var checkpoints: [String]
+    /// Live runs only: which bundled profile resource the filter ran against
+    /// (a hand-vs-pocket profile mix-up is invisible in the trace otherwise).
+    var profileResource: String? = nil
 }
 
 enum DeviceInfo {

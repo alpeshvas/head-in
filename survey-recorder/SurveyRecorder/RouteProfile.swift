@@ -7,6 +7,8 @@ struct RouteProfile: Decodable {
     let segments: [RouteSegment]
     /// Phase-3 turn signature (optional: older profiles predate it).
     let turns: [RouteTurn]?
+    /// Bundle resource this profile was loaded from (set after decode, not JSON).
+    var sourceResource: String?
 
     var routeLabel: String {
         [route.venueId, route.routeId, route.direction, route.devicePose]
@@ -28,10 +30,11 @@ struct RouteProfile: Decodable {
         }
 
         let data = try Data(contentsOf: url)
-        let profile = try JSONDecoder().decode(RouteProfile.self, from: data)
+        var profile = try JSONDecoder().decode(RouteProfile.self, from: data)
         guard profile.schema == 1 else { throw RouteProfileError.unsupportedSchema(profile.schema) }
         guard !profile.segments.isEmpty else { throw RouteProfileError.emptyProfile }
         guard profile.segments.contains(where: \.canMatchMagnetically) else { throw RouteProfileError.noMatchingSegments }
+        profile.sourceResource = resource
         return profile
     }
 }
