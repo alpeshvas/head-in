@@ -30,7 +30,7 @@ Updated: 2026-06-11 (end of grid-filter validation session)
 - 43 m, 6 segments, 7 anchors, contains a route U-turn (+181°) and a twice-traversed hallway. 3 clean passes w/ GT (`Plumeria_L478_*_normal_*-123833/-124255/-124358`; exclude `-123733`, mistapped). Profiles: `plumeria-l478-forward.json` (3-pass, bundled in app) + `plumeria-l478-loo.json`.
 - LOO replay: **6/6 checkpoints within ±4.8 s, P50 0.76 m, but P75 7.2 m** — ~9 s wrong-mode stretch where the posterior jumps to the mirrored outbound hallway; the route U-turn match recaptures it. UI ratchet (displayBin) masks the stretch live. First hard evidence the 4-step window is too short for corridor disambiguation (research floor: 4–8 s) — try windowSteps 6–8 (requires re-running `--calibrate`: sigma/OFF pair is coupled to window stats).
 - Turn-match caveat discovered: routes containing U-turns weaken the unmatched-U-turn pacing defense (pacing ±172° now MATCHES the route's +181° by sign/magnitude). Future: treat a matched turn with ~zero posterior support near its bins as unmatched.
-- Pending: live walk on L478, negative passes (pacing/off-route/standing), pocket-carry passes.
+- Live walk ✅ 2026-06-11 (`..._live_20260611-125057.jsonl`): 6/6 fires, route complete, all 6 turns matched, P(OFF) max 0.27. Pending: negative passes (pacing/off-route/standing — pacing especially: tests the U-turn-match weakening), pocket-carry passes.
 
 ## App state (installed on iPhone 13 "iPhone", UDID B41E2C49-EB3F-5963-9D2A-751DDFD82757)
 
