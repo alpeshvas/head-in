@@ -24,6 +24,7 @@ struct RouteProfile: Decodable {
         ("Plumeria", "plumeria-test-forward"),
         ("Plumeria L478", "plumeria-l478-forward"),
         ("Plumeria L478 (pocket)", "plumeria-l478-pocket"),
+        ("Office right wing", "office-right-wing-forward"),
         ("Meadows", "meadows-test-forward"),
     ]
 

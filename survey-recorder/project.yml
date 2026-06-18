@@ -6,6 +6,10 @@ options:
   createIntermediateGroups: true
 
 schemes:
+  SurveyRecorder:
+    build:
+      targets:
+        SurveyRecorder: all
   FilterParityTests:
     build:
       targets:
