@@ -32,6 +32,7 @@ enum FilterParams {
     static let turnUTurnOffLeak = 0.5
     static let turnReversalLeakPerStep = 0.12
     static let turnReversalSteps = 8
+    static let turnMatchMinSupport = 0.1
 }
 
 /// All profile segments concatenated onto one global bin axis.
@@ -196,11 +197,27 @@ final class RouteBeliefFilter {
     /// belief that already has support near the signature bin; an unmatched
     /// U-turn-scale rotation is a transition into OFF plus a sustained leak
     /// while the heading stays unexplained. Returns true on a signature match.
+    /// True while recent motion is unexplained (after an unmatched U-turn):
+    /// checkpoint decisions must not fire on progress made in this state.
+    var reversalActive: Bool { reversalStepsLeft > 0 }
+
     @discardableResult
     func observeTurn(deltaDeg: Double) -> Bool {
-        let matches = profile.turns.filter {
+        var matches = profile.turns.filter {
             ($0.deltaDeg < 0) == (deltaDeg < 0) &&
                 abs(deltaDeg - $0.deltaDeg) <= FilterParams.turnMatchToleranceDeg
+        }
+        if !matches.isEmpty {
+            // Posterior-support gate: a match from across the route is no match.
+            var support = 0.0
+            var onRoute = 0.0
+            for i in belief.indices {
+                onRoute += belief[i]
+                if matches.contains(where: { abs(Double(i) - Double($0.bin)) <= 3 * $0.sigmaBins }) {
+                    support += belief[i]
+                }
+            }
+            if onRoute > 0 && support / onRoute < FilterParams.turnMatchMinSupport { matches = [] }
         }
         if matches.isEmpty {
             guard abs(deltaDeg) >= FilterParams.turnNegativeMinDeg else { return false }

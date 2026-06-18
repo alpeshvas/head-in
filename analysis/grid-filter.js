@@ -70,6 +70,11 @@ const PARAMS = {
   turnUTurnOffLeak: 0.5,     // on-route mass moved to OFF at the reversal itself
   turnReversalLeakPerStep: 0.12, // extra per-step leak after an unexplained reversal
   turnReversalSteps: 8,      // how many steps the reversal leak lasts
+  // A signature match only counts when the posterior already places this much
+  // of its on-route mass within 3 sigma of a matched turn bin. Without the
+  // gate, pacing U-turns on a route that itself contains a U-turn "match" from
+  // across the route and defeat the OFF injection (seen live on L478).
+  turnMatchMinSupport: 0.1,
 };
 
 // ---------------------------------------------------------------------------
@@ -402,10 +407,20 @@ class RouteGridFilter {
    * signature turn pushes mass into OFF.
    */
   observeTurn(deltaDeg) {
-    const matches = this.gp.turns.filter(
+    let matches = this.gp.turns.filter(
       (turn) => Math.sign(turn.deltaDeg) === Math.sign(deltaDeg) &&
         Math.abs(deltaDeg - turn.deltaDeg) <= PARAMS.turnMatchToleranceDeg
     );
+    if (matches.length) {
+      // Posterior-support gate: a match from across the route is no match.
+      let support = 0;
+      let onRoute = 0;
+      for (let i = 0; i < this.belief.length; i++) {
+        onRoute += this.belief[i];
+        if (matches.some((turn) => Math.abs(i - turn.bin) <= 3 * turn.sigmaBins)) support += this.belief[i];
+      }
+      if (onRoute > 0 && support / onRoute < PARAMS.turnMatchMinSupport) matches = [];
+    }
     if (!matches.length) {
       // A modest unmatched turn (doorway wiggle, hand adjustment) is
       // uninformative; an unmatched U-turn-scale rotation is a transition
@@ -436,6 +451,12 @@ class RouteGridFilter {
     this.reversalStepsLeft = 0; // heading is explained again
     this.normalize();
     return true;
+  }
+
+  /** True while recent motion is unexplained (after an unmatched U-turn):
+   *  checkpoint decisions must not fire on progress made in this state. */
+  reversalActive() {
+    return this.reversalStepsLeft > 0;
   }
 
   meanBin() {
@@ -651,8 +672,10 @@ function replay(profile, session) {
     const pOff = filter.pOff;
     for (const cp of checkpointStates) {
       if (cp.firedAt !== null) continue;
-      // No corroboration, no checkpoint: dead-reckoning alone must not fire events.
+      // No corroboration, no checkpoint: dead-reckoning alone must not fire
+      // events, and neither may progress made while the heading is unexplained.
       const ok = stepsSinceObservation <= PARAMS.observationRecencySteps
+        && !filter.reversalActive()
         && filter.probBeyond(cp.decisionBin) / Math.max(1 - pOff, 1e-9) > PARAMS.checkpointTau
         && pOff < 0.5;
       cp.consecutive = ok ? cp.consecutive + 1 : 0;

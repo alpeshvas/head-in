@@ -43,6 +43,10 @@ final class FilterParityTests: XCTestCase {
         try runFixture(named: "parity-fixture-clean")
     }
 
+    func testL478PacingTraceParity() throws {
+        try runFixture(named: "parity-fixture-l478-pacing")
+    }
+
     private func runFixture(named name: String) throws {
         let bundle = Bundle(for: FilterParityTests.self)
         let fixtureURL = try XCTUnwrap(bundle.url(forResource: name, withExtension: "json"), "missing fixture \(name)")

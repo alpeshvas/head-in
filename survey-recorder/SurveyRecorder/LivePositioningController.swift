@@ -370,6 +370,7 @@ final class LivePositioningController {
             let cp = gp.checkpoints[reachedCheckpoints]
             let onRoute = max(1 - pOff, 1e-9)
             let fired = stepsSinceObservation <= FilterParams.observationRecencySteps
+                && !filter.reversalActive
                 && filter.probBeyond(bin: cp.decisionBin) / onRoute > FilterParams.checkpointTau
                 && pOff < FilterParams.offRouteTau
             checkpointConsecutive = fired ? checkpointConsecutive + 1 : 0
