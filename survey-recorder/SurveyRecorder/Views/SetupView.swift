@@ -12,6 +12,7 @@ struct SetupView: View {
 
     @State private var controller: RecordingController?
     @State private var startError: String?
+    @State private var savedCheckpointsNotice: String?
 
     private var checkpoints: [String] {
         checkpointsText
@@ -110,9 +111,19 @@ struct SetupView: View {
                 // passes, which build-profile requires to merge segments).
                 if controller.isAdHoc, controller.recordedCheckpoints.count >= 2 {
                     checkpointsText = controller.recordedCheckpoints.joined(separator: "\n")
+                    let names = controller.recordedCheckpoints.joined(separator: " → ")
+                    savedCheckpointsNotice = "\(controller.recordedCheckpoints.count) checkpoints saved for \(controller.setup.venueId)/\(controller.setup.routeId):\n\n\(names)\n\nThe next pass reuses them — just tap Start and anchor through the list."
                 }
                 self.controller = nil
             }
+        }
+        .alert("Checkpoints saved", isPresented: Binding(
+            get: { savedCheckpointsNotice != nil },
+            set: { if !$0 { savedCheckpointsNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(savedCheckpointsNotice ?? "")
         }
     }
 
