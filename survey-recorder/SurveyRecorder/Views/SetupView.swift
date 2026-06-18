@@ -23,7 +23,9 @@ struct SetupView: View {
     private var canStart: Bool {
         !venueId.trimmingCharacters(in: .whitespaces).isEmpty
             && !routeId.trimmingCharacters(in: .whitespaces).isEmpty
-            && checkpoints.count >= 2
+            // Either pre-list ≥2 checkpoints, or leave empty and name them
+            // while surveying (ad-hoc mode).
+            && (checkpoints.count >= 2 || checkpoints.isEmpty)
     }
 
     var body: some View {
@@ -75,9 +77,13 @@ struct SetupView: View {
             } header: {
                 Text("Checkpoints (in walking order)")
             } footer: {
-                Text(checkpoints.count < 2
-                    ? "At least 2 checkpoints required (route start and end)."
-                    : "\(checkpoints.count) checkpoints")
+                if checkpoints.isEmpty {
+                    Text("Leave empty to name checkpoints while surveying — drop and name each one as you reach it.")
+                } else if checkpoints.count < 2 {
+                    Text("Add at least 2, or clear the field to name them while surveying.")
+                } else {
+                    Text("\(checkpoints.count) checkpoints")
+                }
             }
 
             Section {

@@ -18,7 +18,13 @@ final class RecordingController {
     private(set) var magneticAccuracy = CMMagneticFieldCalibrationAccuracy.uncalibrated
     private(set) var nextAnchorIndex = 0
     private(set) var anchorCount = 0
+    /// Names actually anchored, in order. In predefined mode this tracks the
+    /// setup list; in ad-hoc mode (empty setup list) it grows as you drop.
+    private(set) var recordedCheckpoints: [String]
     let deviceMotionAvailable: Bool
+
+    /// No checkpoints listed at setup → name them while surveying.
+    var isAdHoc: Bool { setup.checkpoints.isEmpty }
 
     // Ground-truth (ARKit) state — only meaningful when groundTruthEnabled.
     let groundTruthEnabled: Bool
@@ -33,6 +39,7 @@ final class RecordingController {
 
     init(setup: RouteSetup) throws {
         self.setup = setup
+        recordedCheckpoints = setup.checkpoints
         writer = try SessionWriter(setup: setup)
         fileURL = writer.fileURL
         deviceMotionAvailable = recorder.isDeviceMotionAvailable
@@ -171,6 +178,18 @@ final class RecordingController {
 
     func tapAnchor() {
         guard let name = nextCheckpointName else { return }
+        writeAnchor(name: name)
+    }
+
+    /// Ad-hoc mode: drop a checkpoint at the current instant. `pendingName` is
+    /// typed while walking up to the spot, so the tap is the precise arrival
+    /// time; empty falls back to an auto name that can be renamed offline.
+    func dropCheckpoint(pendingName: String) {
+        let trimmed = pendingName.trimmingCharacters(in: .whitespaces)
+        writeAnchor(name: trimmed.isEmpty ? "Checkpoint \(anchorCount + 1)" : trimmed)
+    }
+
+    private func writeAnchor(name: String) {
         writer.writeLine([
             "type": "anchor",
             "t": ProcessInfo.processInfo.systemUptime,
@@ -178,6 +197,7 @@ final class RecordingController {
             "name": name,
         ])
         writer.flush()
+        if isAdHoc { recordedCheckpoints.append(name) }
         anchorCount += 1
         nextAnchorIndex += 1
         UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
@@ -187,6 +207,7 @@ final class RecordingController {
         guard nextAnchorIndex > 0 else { return }
         nextAnchorIndex -= 1
         anchorCount -= 1
+        if isAdHoc, !recordedCheckpoints.isEmpty { recordedCheckpoints.removeLast() }
         // Append-only log: downstream tooling drops the matching anchor on undo.
         writer.writeLine([
             "type": "anchor_undo",
@@ -209,6 +230,7 @@ final class RecordingController {
             "arPoseSamples": arPoseCount,
             "anchors": anchorCount,
             "steps": steps,
+            "checkpoints": recordedCheckpoints,
         ])
         writer.close()
         UIApplication.shared.isIdleTimerDisabled = false
