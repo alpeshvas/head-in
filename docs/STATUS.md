@@ -41,7 +41,7 @@ Updated: 2026-06-11 (end of grid-filter validation session)
 
 1. **Turn anchors** (Phase 3): gyro yaw turn events matched against route turn signature → snap progress, flag missing/unexpected turns. Fixes pacing first-checkpoint false fire.
 2. **JS↔Swift parity test** (shared fixture; second hand-sync already happened — biggest correctness risk).
-3. **Commit the working tree** — NOTHING from this session is committed (recorder upgrades, ground-truth tooling, grid filter ×2, live tracing, 6 research docs, this file).
+3. ~~Commit the working tree~~ ✅ Done 2026-06-11 (four logical commits: recorder upgrades, analysis tooling, live positioning tab, recordings+docs). Note: `recordings/` and `recordings-new/` hold near-duplicate session sets — consolidate sometime.
 4. Cosmetics: live-trace scorer label; freeze segment label when off-route; HTML meters in match-route. (Fixed 2026-06-11: segment card/rings now floored at last reached checkpoint via `displayBin`, so they can no longer contradict the ratcheted timeline.)
 5. More negative recordings (off-route walk in a different room, standing pass) + pocket-carry passes; re-fit params as traces accumulate.
 
