@@ -28,6 +28,11 @@ struct RecordView: View {
             Text("\(controller.setup.direction.rawValue.capitalized) · \(controller.setup.devicePose.rawValue.capitalized)")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+            if controller.setup.passType.isNegative {
+                Label("Negative pass: \(controller.setup.passType.label)", systemImage: "xmark.octagon.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(.orange)
+            }
             if !controller.deviceMotionAvailable {
                 Label("Device motion unavailable on this device", systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
@@ -85,9 +90,25 @@ struct RecordView: View {
                 stat("Samples", "\(controller.deviceMotionCount)")
                 stat("Calibration", calibrationLabel)
             }
+
+            if controller.setup.recordGroundTruth {
+                HStack(spacing: 16) {
+                    stat("Ground truth", controller.groundTruthStatus)
+                    stat("AR poses", "\(controller.arPoseCount)")
+                }
+                .foregroundStyle(groundTruthColor)
+            }
         }
         .padding()
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var groundTruthColor: Color {
+        switch controller.groundTruthStatus {
+        case "tracking": return .green
+        case "off", "starting": return .secondary
+        default: return .orange
+        }
     }
 
     private func stat(_ label: String, _ value: String) -> some View {

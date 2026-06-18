@@ -20,8 +20,15 @@ final class RecordingController {
     private(set) var anchorCount = 0
     let deviceMotionAvailable: Bool
 
+    // Ground-truth (ARKit) state — only meaningful when groundTruthEnabled.
+    let groundTruthEnabled: Bool
+    private(set) var arPoseCount = 0
+    private(set) var arTrackingLabel = "starting"
+    private(set) var groundTruthStatus: String
+
     private let writer: SessionWriter
     private let recorder = SensorRecorder()
+    private let poseRecorder = ARPoseRecorder()
     private var stopped = false
 
     init(setup: RouteSetup) throws {
@@ -29,6 +36,10 @@ final class RecordingController {
         writer = try SessionWriter(setup: setup)
         fileURL = writer.fileURL
         deviceMotionAvailable = recorder.isDeviceMotionAvailable
+        groundTruthEnabled = setup.recordGroundTruth && ARPoseRecorder.isSupported
+        groundTruthStatus = setup.recordGroundTruth
+            ? (ARPoseRecorder.isSupported ? "starting" : "unsupported")
+            : "off"
 
         recorder.onDeviceMotion = { [weak self] dm in
             guard let self else { return }
@@ -115,6 +126,40 @@ final class RecordingController {
             ])
         }
 
+        if groundTruthEnabled {
+            poseRecorder.onPose = { [weak self] pose in
+                guard let self else { return }
+                writer.writeLine([
+                    "type": "arpose",
+                    "t": jsonRound(pose.t),
+                    "p": [
+                        "x": jsonRound(pose.x, 4),
+                        "y": jsonRound(pose.y, 4),
+                        "z": jsonRound(pose.z, 4),
+                    ],
+                    "e": [
+                        "pitch": jsonRound(pose.pitch, 4),
+                        "yaw": jsonRound(pose.yaw, 4),
+                        "roll": jsonRound(pose.roll, 4),
+                    ],
+                    "track": pose.tracking,
+                ])
+                let count = self.arPoseCount + 1
+                let tracking = pose.tracking
+                Task { @MainActor in
+                    self.arPoseCount = count
+                    self.arTrackingLabel = tracking
+                    self.groundTruthStatus = tracking == "normal" ? "tracking" : tracking
+                }
+            }
+            poseRecorder.onUnavailable = { [weak self] reason in
+                guard let self else { return }
+                writer.writeLine(["type": "arpose_unavailable", "reason": reason])
+                Task { @MainActor in self.groundTruthStatus = reason }
+            }
+            poseRecorder.start()
+        }
+
         recorder.start()
         UIApplication.shared.isIdleTimerDisabled = true
     }
@@ -155,11 +200,13 @@ final class RecordingController {
         guard !stopped else { return }
         stopped = true
         recorder.stop()
+        poseRecorder.stop()
         writer.writeLine([
             "type": "end",
             "t": ProcessInfo.processInfo.systemUptime,
             "deviceMotionSamples": deviceMotionCount,
             "rawMagSamples": rawMagCount,
+            "arPoseSamples": arPoseCount,
             "anchors": anchorCount,
             "steps": steps,
         ])

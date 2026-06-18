@@ -6,6 +6,8 @@ struct SetupView: View {
     @AppStorage("floorId") private var floorId = ""
     @AppStorage("direction") private var direction = Direction.forward.rawValue
     @AppStorage("devicePose") private var devicePose = DevicePose.hand.rawValue
+    @AppStorage("passType") private var passType = PassType.normal.rawValue
+    @AppStorage("recordGroundTruth") private var recordGroundTruth = false
     @AppStorage("checkpointsText") private var checkpointsText = ""
 
     @State private var controller: RecordingController?
@@ -40,6 +42,30 @@ struct SetupView: View {
                         Text(p.rawValue.capitalized).tag(p.rawValue)
                     }
                 }
+            }
+
+            Section {
+                Picker("Pass type", selection: $passType) {
+                    ForEach(PassType.surveyCases) { type in
+                        Text(type.label).tag(type.rawValue)
+                    }
+                }
+            } header: {
+                Text("Pass type")
+            } footer: {
+                Text(PassType(rawValue: passType)?.isNegative == true
+                    ? "Negative pass — used to test that the matcher correctly rejects this. It should NOT track as a clean route walk."
+                    : "Clean route walk for building fingerprints.")
+            }
+
+            Section {
+                Toggle("Record ground truth (ARKit)", isOn: $recordGroundTruth)
+            } header: {
+                Text("Ground truth")
+            } footer: {
+                Text(ARPoseRecorder.isSupported
+                    ? "Surveyor-only. Uses the camera to log a precise 6-DoF trajectory for offline evaluation and training. Never used in the shipped tour app. Hold the phone so the camera sees the space; point at textured surfaces, not blank walls."
+                    : "AR world tracking is not supported on this device; ground truth will be skipped.")
             }
 
             Section {
@@ -84,6 +110,8 @@ struct SetupView: View {
             floorId: floorId.trimmingCharacters(in: .whitespaces),
             direction: Direction(rawValue: direction) ?? .forward,
             devicePose: DevicePose(rawValue: devicePose) ?? .hand,
+            passType: PassType(rawValue: passType) ?? .normal,
+            recordGroundTruth: recordGroundTruth,
             checkpoints: checkpoints
         )
         do {

@@ -17,6 +17,7 @@ targets:
         CFBundleDisplayName: Survey Recorder
         UILaunchScreen: {}
         NSMotionUsageDescription: Step, motion, and barometer data are recorded during route surveys to build indoor positioning fingerprints.
+        NSCameraUsageDescription: The camera is used only during surveyor ground-truth recording (ARKit) to log a precise walking trajectory. It is never used in the tour experience.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UISupportedInterfaceOrientations:
@@ -30,6 +31,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.0"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: X4JNSD5GJ6
         GENERATE_INFOPLIST_FILE: false
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: 0.1.0

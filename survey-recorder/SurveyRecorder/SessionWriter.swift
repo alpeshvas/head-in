@@ -27,7 +27,7 @@ final class SessionWriter {
         let safe = { (s: String) -> String in
             s.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "-", options: .regularExpression)
         }
-        let name = "\(safe(setup.venueId))_\(safe(setup.routeId))_\(setup.direction.rawValue)_\(setup.devicePose.rawValue)_\(stamp).jsonl"
+        let name = "\(safe(setup.venueId))_\(safe(setup.routeId))_\(setup.direction.rawValue)_\(setup.devicePose.rawValue)_\(setup.passType.rawValue)_\(stamp).jsonl"
         fileURL = dir.appendingPathComponent(name)
 
         FileManager.default.createFile(atPath: fileURL.path, contents: nil)
@@ -37,12 +37,14 @@ final class SessionWriter {
         let bootToUnixOffset = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
         writeLine([
             "type": "meta",
-            "schema": 1,
+            "schema": 2,
             "venueId": setup.venueId,
             "routeId": setup.routeId,
             "floorId": setup.floorId,
             "direction": setup.direction.rawValue,
             "devicePose": setup.devicePose.rawValue,
+            "passType": setup.passType.rawValue,
+            "groundTruth": setup.recordGroundTruth,
             "checkpoints": setup.checkpoints,
             "deviceModel": DeviceInfo.modelIdentifier,
             "systemVersion": ProcessInfo.processInfo.operatingSystemVersionString,
