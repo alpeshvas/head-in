@@ -13,6 +13,11 @@ final class TwoDRuntimeController {
     private(set) var detectedSteps = 0
     private(set) var magneticUpdates = 0
     private(set) var estimate: ParticleEstimate2D?
+    private(set) var particleSnapshot: [MapPoint2D] = []
+    private(set) var lastMagneticChangeUT: Double?
+    private(set) var expectedMagneticChangeUT: Double?
+    private(set) var magneticResidualUT: Double?
+    private(set) var nearestHeatmapCellDistanceMeters: Double?
 
     @ObservationIgnored private let sensorRecorder = SensorRecorder()
     @ObservationIgnored private var stepDetector = StepDetector2D()
@@ -36,10 +41,16 @@ final class TwoDRuntimeController {
         estimate = filter?.estimate
         detectedSteps = 0
         magneticUpdates = 0
+        particleSnapshot = []
+        lastMagneticChangeUT = nil
+        expectedMagneticChangeUT = nil
+        magneticResidualUT = nil
+        nearestHeatmapCellDistanceMeters = nil
         pendingYawDelta = 0
         previousMotionTimestamp = nil
         lastStepFeature = nil
         stepDetector.reset()
+        if let filter { updateRuntimeDiagnostics(filter: filter) }
         isRunning = true
         statusText = "Tracking from \(entrance.name)"
 
@@ -90,10 +101,29 @@ final class TwoDRuntimeController {
             let magneticChange = hypot(feature.magnitudeUT - previous.magnitudeUT, feature.verticalUT - previous.verticalUT)
             filter.observe(magneticChangeUT: magneticChange)
             magneticUpdates += 1
+            lastMagneticChangeUT = magneticChange
         }
         if let feature { lastStepFeature = feature }
         estimate = filter.estimate
+        updateRuntimeDiagnostics(filter: filter)
         updateStatus()
+    }
+
+    private func updateRuntimeDiagnostics(filter: ParticleFilter2D) {
+        guard let estimate else { return }
+        expectedMagneticChangeUT = filter.expectedMagneticChangeUT(at: estimate.point)
+        nearestHeatmapCellDistanceMeters = filter.nearestHeatmapCellDistanceMeters(to: estimate.point)
+        if let lastMagneticChangeUT, let expectedMagneticChangeUT {
+            magneticResidualUT = lastMagneticChangeUT - expectedMagneticChangeUT
+        } else {
+            magneticResidualUT = nil
+        }
+
+        let stride = max(1, filter.particles.count / 250)
+        particleSnapshot = filter.particles.enumerated().compactMap { index, particle in
+            guard index.isMultiple(of: stride) else { return nil }
+            return MapPoint2D(x: particle.x, y: particle.y)
+        }
     }
 
     private func updateStatus() {

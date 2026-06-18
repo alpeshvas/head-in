@@ -86,8 +86,10 @@ function pointInPolygon(point, polygon) {
   for (let i = 0; i < polygon.length; i++) {
     const pi = polygon[i];
     const pj = polygon[j];
-    if (((pi.y > point.y) !== (pj.y > point.y)) &&
-        (point.x < ((pj.x - pi.x) * (point.y - pi.y)) / Math.max(pj.y - pi.y, 1e-9) + pi.x)) {
+    const dy = pj.y - pi.y;
+    if (Math.abs(dy) > 1e-9 &&
+        ((pi.y > point.y) !== (pj.y > point.y)) &&
+        (point.x < ((pj.x - pi.x) * (point.y - pi.y)) / dy + pi.x)) {
       inside = !inside;
     }
     j = i;
@@ -96,6 +98,9 @@ function pointInPolygon(point, polygon) {
 }
 
 function isWalkable(map, sample) {
+  if (Array.isArray(map.rooms) && map.rooms.some((room) => pointInPolygon(sample, room.polygon))) {
+    return true;
+  }
   if (!Array.isArray(map.walkablePolygons) || map.walkablePolygons.length === 0) {
     return sample.x >= 0 && sample.y >= 0 && sample.x <= map.widthMeters && sample.y <= map.heightMeters;
   }

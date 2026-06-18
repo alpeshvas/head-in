@@ -45,7 +45,8 @@ struct MapHeatmapView: View {
                     cells: cells,
                     mode: mode,
                     currentPoint: surveyController?.latestMapPoint,
-                    runtimeEstimate: runtimeController?.estimate
+                    runtimeEstimate: runtimeController?.estimate,
+                    runtimeParticles: runtimeController?.particleSnapshot ?? []
                 )
                     .frame(height: 480)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -191,6 +192,8 @@ struct MapHeatmapView: View {
                     }
                     HStack(spacing: 14) {
                         stat("Position", controller.latestMapPoint.map { String(format: "%.1f, %.1f", $0.x, $0.y) } ?? "-")
+                        stat("Mag", controller.latestMagneticFeature.map { String(format: "%.1fµT", $0.magnitudeUT) } ?? "-")
+                        stat("Vertical", controller.latestMagneticFeature.map { String(format: "%.1fµT", $0.verticalUT) } ?? "-")
                         stat("Rejected", "\(controller.rejectedOutsideWalkableCount)")
                     }
 
@@ -231,6 +234,16 @@ struct MapHeatmapView: View {
                         stat("Steps", "\(controller.detectedSteps)")
                         stat("Mag obs", "\(controller.magneticUpdates)")
                         stat("Radius", controller.estimate.map { String(format: "%.1fm", $0.confidenceRadiusMeters) } ?? "-")
+                    }
+                    HStack(spacing: 14) {
+                        stat("Observed", controller.lastMagneticChangeUT.map { String(format: "%.2fµT", $0) } ?? "-")
+                        stat("Expected", controller.expectedMagneticChangeUT.map { String(format: "%.2fµT", $0) } ?? "-")
+                        stat("Residual", controller.magneticResidualUT.map { String(format: "%+.2fµT", $0) } ?? "-")
+                    }
+                    HStack(spacing: 14) {
+                        stat("Nearest cell", controller.nearestHeatmapCellDistanceMeters.map { String(format: "%.1fm", $0) } ?? "-")
+                        stat("Neff", controller.estimate.map { String(format: "%.0f", $0.effectiveParticleCount) } ?? "-")
+                        stat("Particles", "\(controller.particleSnapshot.count)")
                     }
                 } else if map.entrances.isEmpty || cells.isEmpty {
                     Text(map.entrances.isEmpty ? "Add an entrance before runtime tracking." : "Generate/import heatmap cells before runtime tracking.")
@@ -341,6 +354,7 @@ struct FloorPlanHeatmapCanvas: View {
     let mode: HeatmapMode2D
     var currentPoint: MapPoint2D? = nil
     var runtimeEstimate: ParticleEstimate2D? = nil
+    var runtimeParticles: [MapPoint2D] = []
 
     // Live pan/zoom so dense venues aren't crammed into the fit-to-frame view.
     @State private var committedZoom: CGFloat = 1
@@ -378,6 +392,7 @@ struct FloorPlanHeatmapCanvas: View {
                     drawWalls(in: &context, transform: transform)
                     drawEntrances(in: &context, transform: transform, zoom: liveZoom)
                     drawAlignmentPoints(in: &context, transform: transform, zoom: liveZoom)
+                    drawRuntimeParticles(in: &context, transform: transform)
                     drawRuntimeEstimate(in: &context, transform: transform)
                     drawCurrentPoint(in: &context, transform: transform)
                 }
@@ -610,6 +625,15 @@ struct FloorPlanHeatmapCanvas: View {
         context.fill(Path(ellipseIn: circle), with: .color(.indigo.opacity(0.12)))
         context.stroke(Path(ellipseIn: circle), with: .color(.indigo.opacity(0.75)), lineWidth: 2)
         context.fill(Path(ellipseIn: dot), with: .color(.indigo))
+    }
+
+    private func drawRuntimeParticles(in context: inout GraphicsContext, transform: MapTransform) {
+        for particle in runtimeParticles {
+            guard Geometry2D.isWalkable(particle, in: map) else { continue }
+            let p = transform.point(particle)
+            let dot = CGRect(x: p.x - 1.5, y: p.y - 1.5, width: 3, height: 3)
+            context.fill(Path(ellipseIn: dot), with: .color(.indigo.opacity(0.24)))
+        }
     }
 
     // Coverage ramp: red = sparse data, green = enough. High, opaque alpha so cells

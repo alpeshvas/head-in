@@ -104,6 +104,9 @@ struct SurveySample2D: Codable, Hashable {
 
 enum Geometry2D {
     static func isWalkable(_ point: MapPoint2D, in map: VenueMap2D) -> Bool {
+        if map.rooms.contains(where: { pointInPolygon(point, polygon: $0.polygon) }) {
+            return true
+        }
         if map.walkablePolygons.isEmpty {
             return point.x >= 0 && point.y >= 0 && point.x <= map.widthMeters && point.y <= map.heightMeters
         }

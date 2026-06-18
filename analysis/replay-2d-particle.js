@@ -73,13 +73,15 @@ function pointInPolygon(p, poly) {
   let inside = false, j = poly.length - 1;
   for (let i = 0; i < poly.length; i++) {
     const pi = poly[i], pj = poly[j];
-    if (((pi.y > p.y) !== (pj.y > p.y)) && p.x < ((pj.x - pi.x) * (p.y - pi.y)) / Math.max(pj.y - pi.y, 1e-9) + pi.x) inside = !inside;
+    const dy = pj.y - pi.y;
+    if (Math.abs(dy) > 1e-9 && ((pi.y > p.y) !== (pj.y > p.y)) && p.x < ((pj.x - pi.x) * (p.y - pi.y)) / dy + pi.x) inside = !inside;
     j = i;
   }
   return inside;
 }
 
 function isWalkable(map, p) {
+  if (Array.isArray(map.rooms) && map.rooms.some((room) => pointInPolygon(p, room.polygon))) return true;
   if (!map.walkablePolygons || map.walkablePolygons.length === 0) return p.x >= 0 && p.y >= 0 && p.x <= map.widthMeters && p.y <= map.heightMeters;
   return map.walkablePolygons.some((poly) => pointInPolygon(p, poly));
 }

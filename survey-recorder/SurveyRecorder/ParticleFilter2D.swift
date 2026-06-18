@@ -81,12 +81,21 @@ final class ParticleFilter2D {
         guard !heatmapCells.isEmpty else { return }
         let sigma2 = ParticleFilter2DParams.magneticSigmaUT * ParticleFilter2DParams.magneticSigmaUT
         for i in particles.indices {
-            let expected = nearestCell(to: MapPoint2D(x: particles[i].x, y: particles[i].y))?.magneticChangeUT ?? 0
+            let expected = expectedMagneticChangeUT(at: MapPoint2D(x: particles[i].x, y: particles[i].y)) ?? 0
             let residual = magneticChangeUT - expected
             particles[i].weight *= exp(-0.5 * residual * residual / sigma2)
         }
         normalize()
         if effectiveParticleCount < Double(particles.count) * ParticleFilter2DParams.resampleNeffFraction { resample() }
+    }
+
+    func expectedMagneticChangeUT(at point: MapPoint2D) -> Double? {
+        nearestCell(to: point)?.magneticChangeUT
+    }
+
+    func nearestHeatmapCellDistanceMeters(to point: MapPoint2D) -> Double? {
+        guard let cell = nearestCell(to: point) else { return nil }
+        return sqrt(distanceSquared(cell.center, point))
     }
 
     var estimate: ParticleEstimate2D {

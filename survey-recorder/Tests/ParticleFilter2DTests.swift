@@ -64,6 +64,39 @@ final class ParticleFilter2DTests: XCTestCase {
         XCTAssertFalse(Geometry2D.pointInPolygon(MapPoint2D(x: 5, y: 2), polygon: Array(counterClockwise)))
     }
 
+    func testRoomsCountAsWalkableZonesWhenWalkablePolygonOmitsInterior() {
+        let map = VenueMap2D(
+            venueId: "test",
+            name: "Test",
+            widthMeters: 10,
+            heightMeters: 10,
+            image: nil,
+            walkablePolygons: [[
+                MapPoint2D(x: 8, y: 8),
+                MapPoint2D(x: 9, y: 8),
+                MapPoint2D(x: 9, y: 9),
+                MapPoint2D(x: 8, y: 9),
+            ]],
+            walls: [],
+            rooms: [Room2D(
+                id: "room",
+                name: "Room",
+                polygon: [
+                    MapPoint2D(x: 1, y: 1),
+                    MapPoint2D(x: 4, y: 1),
+                    MapPoint2D(x: 4, y: 4),
+                    MapPoint2D(x: 1, y: 4),
+                ]
+            )],
+            entrances: [],
+            alignmentPoints: []
+        )
+
+        XCTAssertTrue(Geometry2D.isWalkable(MapPoint2D(x: 2, y: 2), in: map))
+        XCTAssertTrue(Geometry2D.isWalkable(MapPoint2D(x: 8.5, y: 8.5), in: map))
+        XCTAssertFalse(Geometry2D.isWalkable(MapPoint2D(x: 6, y: 6), in: map))
+    }
+
     private static let openMap = VenueMap2D(
         venueId: "test",
         name: "Test",

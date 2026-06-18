@@ -44,6 +44,14 @@
     </div>
     <label>Floor plan image <input id="imageInput" type="file" accept="image/*"></label>
 
+    <h2>Scale</h2>
+    <label>Known distance m <input id="scaleDistanceMeters" type="number" step="0.01" min="0" placeholder="e.g. 10"></label>
+    <div class="row">
+      <button data-tool="scale">Set scale points</button>
+      <button id="applyScale" class="primary">Apply scale</button>
+    </div>
+    <p id="scaleHint" class="hint">Click two points with a known real-world distance. With an image loaded, width/height are set from image pixels.</p>
+
     <h2>Draw</h2>
     <div class="tools">
       <button data-tool="walkable" class="active">Walkable</button>
@@ -79,6 +87,7 @@ const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const objectList = document.getElementById('objectList');
 const jsonOut = document.getElementById('jsonOut');
+const scaleHint = document.getElementById('scaleHint');
 
 const state = {
   tool: 'walkable',
@@ -86,6 +95,7 @@ const state = {
   imageFileName: null,
   draft: [],
   wallStart: null,
+  scalePoints: [],
   map: {
     venueId: 'demo-gallery',
     name: 'Demo Gallery',
@@ -168,6 +178,7 @@ function draw() {
   drawWalls();
   drawPoints(state.map.entrances, '#2563eb', 'E');
   drawPoints(state.map.alignmentPoints, '#9333ea', 'A');
+  drawScalePoints();
   drawDraft();
   renderObjects();
 }
@@ -249,6 +260,30 @@ function drawDraft() {
   });
 }
 
+function drawScalePoints() {
+  if (!state.scalePoints.length) return;
+  ctx.strokeStyle = '#f97316';
+  ctx.fillStyle = '#f97316';
+  ctx.lineWidth = 2;
+  state.scalePoints.forEach((point, idx) => {
+    const p = toCanvas(point);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#111827';
+    ctx.font = '700 11px system-ui';
+    ctx.fillText(`S${idx + 1}`, p.x + 8, p.y - 8);
+    ctx.fillStyle = '#f97316';
+    if (idx > 0) {
+      const prev = toCanvas(state.scalePoints[idx - 1]);
+      ctx.beginPath();
+      ctx.moveTo(prev.x, prev.y);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+  });
+}
+
 function centroid(poly) {
   return poly.reduce((acc, p) => ({ x: acc.x + p.x / poly.length, y: acc.y + p.y / poly.length }), { x: 0, y: 0 });
 }
@@ -263,9 +298,17 @@ function renderObjects() {
   ].join('<br>');
   statusEl.textContent = state.tool === 'wall'
     ? 'Wall mode: click start and end points.'
+    : state.tool === 'scale'
+      ? 'Scale mode: click two points, enter known distance, then Apply scale.'
     : state.tool === 'entrance' || state.tool === 'alignment'
       ? 'Point mode: click once, then name it.'
       : 'Polygon mode: click vertices, then Finish polygon.';
+  if (state.scalePoints.length === 2) {
+    const d = distance(state.scalePoints[0], state.scalePoints[1]);
+    scaleHint.textContent = `Scale points set. Current map distance: ${d.toFixed(3)} m.`;
+  } else {
+    scaleHint.textContent = `Click two points with a known real-world distance. Points selected: ${state.scalePoints.length}/2.`;
+  }
 }
 
 canvas.addEventListener('click', event => {
@@ -273,7 +316,10 @@ canvas.addEventListener('click', event => {
   const point = toMap(event.clientX - rect.left, event.clientY - rect.top);
   if (point.x < 0 || point.y < 0 || point.x > state.map.widthMeters || point.y > state.map.heightMeters) return;
 
-  if (state.tool === 'wall') {
+  if (state.tool === 'scale') {
+    if (state.scalePoints.length >= 2) state.scalePoints = [];
+    state.scalePoints.push(point);
+  } else if (state.tool === 'wall') {
     if (!state.wallStart) state.wallStart = point;
     else {
       state.map.walls.push({ id: `wall-${state.map.walls.length + 1}`, points: [state.wallStart, point] });
@@ -317,6 +363,42 @@ document.getElementById('finishPolygon').addEventListener('click', () => {
 
 document.getElementById('undoPoint').addEventListener('click', () => { state.draft.pop(); draw(); });
 document.getElementById('clearDraft').addEventListener('click', () => { state.draft = []; state.wallStart = null; draw(); });
+
+document.getElementById('applyScale').addEventListener('click', () => {
+  syncFormToMap();
+  if (state.scalePoints.length !== 2) { alert('Click two scale points first.'); return; }
+  const knownMeters = Number(document.getElementById('scaleDistanceMeters').value);
+  if (!Number.isFinite(knownMeters) || knownMeters <= 0) { alert('Enter a positive known distance in meters.'); return; }
+
+  const oldWidth = state.map.widthMeters;
+  const oldHeight = state.map.heightMeters;
+  let newWidth;
+  let newHeight;
+
+  if (state.image) {
+    const a = state.scalePoints[0];
+    const b = state.scalePoints[1];
+    const ax = (a.x / oldWidth) * state.image.naturalWidth;
+    const ay = (a.y / oldHeight) * state.image.naturalHeight;
+    const bx = (b.x / oldWidth) * state.image.naturalWidth;
+    const by = (b.y / oldHeight) * state.image.naturalHeight;
+    const pixelDistance = Math.hypot(bx - ax, by - ay);
+    if (pixelDistance <= 0) { alert('Scale points must be different.'); return; }
+    const metersPerPixel = knownMeters / pixelDistance;
+    newWidth = state.image.naturalWidth * metersPerPixel;
+    newHeight = state.image.naturalHeight * metersPerPixel;
+  } else {
+    const currentDistance = distance(state.scalePoints[0], state.scalePoints[1]);
+    if (currentDistance <= 0) { alert('Scale points must be different.'); return; }
+    const factor = knownMeters / currentDistance;
+    newWidth = oldWidth * factor;
+    newHeight = oldHeight * factor;
+  }
+
+  rescaleMap(oldWidth, oldHeight, newWidth, newHeight);
+  syncMapToForm();
+  draw();
+});
 
 document.getElementById('imageInput').addEventListener('change', event => {
   const file = event.target.files[0];
@@ -364,6 +446,7 @@ document.getElementById('loadJson').addEventListener('click', () => {
     state.map = parsed.map;
     state.draft = [];
     state.wallStart = null;
+    state.scalePoints = [];
     syncMapToForm();
     draw();
   } catch (error) {
@@ -376,6 +459,27 @@ document.getElementById('loadJson').addEventListener('click', () => {
 });
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
+
+function distance(a, b) {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function rescaleMap(oldWidth, oldHeight, newWidth, newHeight) {
+  if (![oldWidth, oldHeight, newWidth, newHeight].every(v => Number.isFinite(v) && v > 0)) return;
+  const sx = newWidth / oldWidth;
+  const sy = newHeight / oldHeight;
+  const scalePoint = p => ({ x: round(p.x * sx), y: round(p.y * sy) });
+  state.map.widthMeters = round(newWidth);
+  state.map.heightMeters = round(newHeight);
+  state.map.walkablePolygons = state.map.walkablePolygons.map(poly => poly.map(scalePoint));
+  state.map.rooms = state.map.rooms.map(room => ({ ...room, polygon: room.polygon.map(scalePoint) }));
+  state.map.walls = state.map.walls.map(wall => ({ ...wall, points: wall.points.map(scalePoint) }));
+  state.map.entrances = state.map.entrances.map(item => ({ ...item, point: scalePoint(item.point) }));
+  state.map.alignmentPoints = state.map.alignmentPoints.map(item => ({ ...item, point: scalePoint(item.point) }));
+  state.draft = state.draft.map(scalePoint);
+  state.scalePoints = state.scalePoints.map(scalePoint);
+  if (state.wallStart) state.wallStart = scalePoint(state.wallStart);
+}
 </script>
 </body>
 </html>

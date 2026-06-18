@@ -12,6 +12,7 @@ final class TwoDSurveyController {
     private(set) var trackingStatus = "off"
     private(set) var latestMapPoint: MapPoint2D?
     private(set) var latestRoomName: String?
+    private(set) var latestMagneticFeature: MagneticFeature2D?
     private(set) var sampleCount = 0
     private(set) var rejectedOutsideWalkableCount = 0
     private(set) var heatmapCells: [MagneticHeatmapCell]
@@ -54,6 +55,7 @@ final class TwoDSurveyController {
         trackingStatus = "starting"
         latestMapPoint = nil
         latestRoomName = nil
+        latestMagneticFeature = nil
         sampleCount = 0
         rejectedOutsideWalkableCount = 0
         samples.removeAll(keepingCapacity: true)
@@ -146,6 +148,7 @@ final class TwoDSurveyController {
             gravityVector: Vector3D(x: gravity.x, y: gravity.y, z: gravity.z),
             accuracyRawValue: Int(motion.magneticField.accuracy.rawValue)
         ) else { return }
+        latestMagneticFeature = feature
 
         let mapPoint = transform.mapPoint(for: ar)
         latestMapPoint = mapPoint
