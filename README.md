@@ -24,8 +24,8 @@ The first useful target is route-constrained positioning, not free-form indoor G
 1. Survey recorder — **done** (`survey-recorder/`, see below)
 2. Checkpoint anchoring workflow — **done** (anchor button + undo in the recorder)
 3. Local survey session format — **done** (JSONL, schema in [research notes](docs/research-notes.md))
-4. Fingerprint processing pipeline — started (`analysis/`, repeatability only)
-5. Route-segment matcher
+4. Fingerprint processing pipeline — **started** (`analysis/`, repeatability + profile builder)
+5. Route-segment matcher — **started** (offline matcher)
 6. Confidence scoring and fallback rules
 
 ## Survey Recorder (iOS)
@@ -72,6 +72,25 @@ npm run position -- session1.jsonl session2.jsonl session3.jsonl --out analysis/
 This is not a production tracker yet. With only Start/End anchors, its error
 metric is measured against normalized replay time. Add intermediate anchors to
 validate real checkpoint/position error.
+
+## Route Profile + Offline Matcher
+
+Build a reusable fingerprint profile from repeated walks:
+
+```sh
+npm run build-profile -- Meadows_Test_forward_hand_*.jsonl --out profiles/meadows-test-forward.json
+```
+
+Then replay a session against that profile:
+
+```sh
+npm run match -- profiles/meadows-test-forward.json Meadows_Test_forward_hand_20260610-200257.jsonl --out analysis/meadows-match.html
+```
+
+The profile builder classifies very short/adjacent anchor spans as
+`transition` segments and excludes them from magnetic matching. The matcher uses
+recorded anchors only to split offline validation segments; a production runtime
+matcher still needs a live segment-state model.
 
 ## Notes
 

@@ -20,6 +20,12 @@ Turns raw survey sessions into route-segment fingerprints.
 - align samples to route distance
 - normalize for device orientation where possible
 - store segment-level magnetic signatures
+- classify very short adjacent-anchor spans as transition segments instead of matchable fingerprints
+
+Implemented prototype artifacts:
+
+- `analysis/analyze-repeatability.js` checks repeated-pass magnetic quality.
+- `analysis/build-profile.js` builds reusable JSON route profiles with magnetic mean/stddev arrays and segment quality metadata.
 
 ## Runtime Matcher
 
@@ -30,6 +36,10 @@ Compares live sensor windows against known fingerprints and map constraints.
 - detect turns with gyroscope
 - constrain candidates to walkable path geometry
 - emit confidence-scored positioning events
+
+Implemented prototype artifact:
+
+- `analysis/match-route.js` replays one recorded session against a route profile. It uses anchors only for offline validation segmentation; production still needs a live segment-state model.
 
 ## Product Contract
 

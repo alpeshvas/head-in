@@ -6,6 +6,8 @@
   "scripts": {
     "analyze": "node analysis/analyze-repeatability.js",
     "position": "node analysis/pdr-assisted-positioning.js",
+    "build-profile": "node analysis/build-profile.js",
+    "match": "node analysis/match-route.js",
     "test": "echo \"No tests configured yet\""
   },
   "keywords": [
