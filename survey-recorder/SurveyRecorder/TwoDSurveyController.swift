@@ -51,6 +51,9 @@ final class TwoDSurveyController {
         latestRoomName = nil
         sampleCount = 0
         samples.removeAll(keepingCapacity: true)
+        // Reset+add: every fresh survey starts from an empty heatmap rather than
+        // building on the previously saved cells.
+        heatmapCells = []
         alignmentPairs.removeAll(keepingCapacity: true)
         transform = nil
         latestARPoint = nil
@@ -132,7 +135,7 @@ final class TwoDSurveyController {
         guard let feature = MagneticFeature2D.from(
             magneticVector: Vector3D(x: mag.x, y: mag.y, z: mag.z),
             gravityVector: Vector3D(x: gravity.x, y: gravity.y, z: gravity.z),
-            accuracyRawValue: motion.magneticField.accuracy.rawValue
+            accuracyRawValue: Int(motion.magneticField.accuracy.rawValue)
         ) else { return }
 
         let mapPoint = transform.mapPoint(for: ar)

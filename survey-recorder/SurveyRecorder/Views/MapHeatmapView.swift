@@ -10,14 +10,21 @@ import AppKit
 struct MapHeatmapView: View {
     @State private var mode = HeatmapMode2D.surveyStrength
     @State private var bundle = VenueMap2DStore.loadSavedOrBundled()
-    @State private var importingMap = false
-    @State private var importingImage = false
+    // Single active-import kind: SwiftUI only honors ONE .fileImporter per view,
+    // so two booleans (map JSON + image) silently broke the JSON importer.
+    @State private var activeImport: ImportKind?
     @State private var importError: String?
+    @State private var saveNote: String?
+
+    private enum ImportKind { case mapJSON, image }
     @State private var surveyController: TwoDSurveyController?
     @State private var runtimeController: TwoDRuntimeController?
 
     private var map: VenueMap2D { bundle.map }
     private var cells: [MagneticHeatmapCell] {
+        // While surveying, show exactly the in-progress cells (empty at reset, then
+        // filling) so a fresh survey visibly starts from scratch.
+        if let controller = surveyController, controller.isRunning { return controller.heatmapCells }
         if let liveCells = surveyController?.heatmapCells, !liveCells.isEmpty { return liveCells }
         return bundle.heatmapCells
     }
@@ -40,7 +47,7 @@ struct MapHeatmapView: View {
                     currentPoint: surveyController?.latestMapPoint,
                     runtimeEstimate: runtimeController?.estimate
                 )
-                    .frame(height: 430)
+                    .frame(height: 480)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -60,12 +67,12 @@ struct MapHeatmapView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button {
-                        importingMap = true
+                        activeImport = .mapJSON
                     } label: {
                         Label("Import map JSON", systemImage: "doc.badge.plus")
                     }
                     Button {
-                        importingImage = true
+                        activeImport = .image
                     } label: {
                         Label("Import floor-plan image", systemImage: "photo")
                     }
@@ -74,16 +81,37 @@ struct MapHeatmapView: View {
                 }
             }
         }
-        .fileImporter(isPresented: $importingMap, allowedContentTypes: [.json]) { result in
+        .fileImporter(
+            isPresented: Binding(
+                get: { activeImport != nil },
+                set: { if !$0 { activeImport = nil } }
+            ),
+            allowedContentTypes: activeImport == .image ? [.image] : [.json]
+        ) { [kind = activeImport] result in
+            defer { activeImport = nil }
             switch result {
             case .success(let url):
                 do {
-                    bundle = try VenueMap2DStore.saveImportedMap(from: url)
+                    switch kind {
+                    case .image:
+                        let fileName = try VenueMap2DStore.copyImportedAsset(from: url)
+                        var updated = bundle
+                        let size = imagePixelSize(at: VenueMap2DStore.venueMapsDirectory.appendingPathComponent(fileName))
+                        updated.map.image = VenueMapImage2D(
+                            fileName: fileName,
+                            widthPixels: Double(size?.width ?? 0),
+                            heightPixels: Double(size?.height ?? 0)
+                        )
+                        try VenueMap2DStore.save(updated)
+                        bundle = updated
+                    case .mapJSON, .none:
+                        bundle = try VenueMap2DStore.saveImportedMap(from: url)
+                        surveyController?.stop()
+                        surveyController = nil
+                        runtimeController?.stop()
+                        runtimeController = nil
+                    }
                     importError = nil
-                    surveyController?.stop()
-                    surveyController = nil
-                    runtimeController?.stop()
-                    runtimeController = nil
                 } catch {
                     importError = error.localizedDescription
                 }
@@ -91,35 +119,13 @@ struct MapHeatmapView: View {
                 importError = error.localizedDescription
             }
         }
-        .alert("Could not import map", isPresented: Binding(
+        .alert("Could not import", isPresented: Binding(
             get: { importError != nil },
             set: { if !$0 { importError = nil } }
         )) {
             Button("OK", role: .cancel) { importError = nil }
         } message: {
             Text(importError ?? "Unknown error")
-        }
-        .fileImporter(isPresented: $importingImage, allowedContentTypes: [.image]) { result in
-            switch result {
-            case .success(let url):
-                do {
-                    let fileName = try VenueMap2DStore.copyImportedAsset(from: url)
-                    var updated = bundle
-                    let size = imagePixelSize(at: VenueMap2DStore.venueMapsDirectory.appendingPathComponent(fileName))
-                    updated.map.image = VenueMapImage2D(
-                        fileName: fileName,
-                        widthPixels: size?.width ?? 0,
-                        heightPixels: size?.height ?? 0
-                    )
-                    try VenueMap2DStore.save(updated)
-                    bundle = updated
-                    importError = nil
-                } catch {
-                    importError = error.localizedDescription
-                }
-            case .failure(let error):
-                importError = error.localizedDescription
-            }
         }
     }
 
@@ -163,6 +169,11 @@ struct MapHeatmapView: View {
                         Text(surveyController?.statusText ?? "Start AR survey, capture alignment points, then walk coverage.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                        if let saveNote {
+                            Label(saveNote, systemImage: "checkmark.circle.fill")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.green)
+                        }
                     }
                     Spacer()
                     Button(surveyController?.isRunning == true ? "Stop" : "Start") {
@@ -250,11 +261,29 @@ struct MapHeatmapView: View {
     private func toggleSurvey() {
         if surveyController?.isRunning == true {
             surveyController?.stop()
+            saveSurveyedHeatmap()
             return
         }
+        saveNote = nil
         let controller = TwoDSurveyController(map: map, existingCells: cells)
         surveyController = controller
         controller.start()
+    }
+
+    /// Bake the just-surveyed heatmap into the persisted venue-map bundle so it
+    /// survives relaunch with no offline build-2d-heatmap.js + re-import round trip.
+    /// Same cell logic as that script (HeatmapAccumulator2D); this only persists it.
+    private func saveSurveyedHeatmap() {
+        guard let controller = surveyController, !controller.heatmapCells.isEmpty else { return }
+        var updated = bundle
+        updated.heatmapCells = controller.heatmapCells
+        do {
+            try VenueMap2DStore.save(updated)
+            bundle = updated
+            saveNote = "Saved \(controller.heatmapCells.count) heatmap cells to this venue map."
+        } catch {
+            importError = "Could not save heatmap: \(error.localizedDescription)"
+        }
     }
 
     private func toggleRuntime() {
@@ -308,16 +337,31 @@ struct FloorPlanHeatmapCanvas: View {
     var currentPoint: MapPoint2D? = nil
     var runtimeEstimate: ParticleEstimate2D? = nil
 
+    // Live pan/zoom so dense venues aren't crammed into the fit-to-frame view.
+    @State private var committedZoom: CGFloat = 1
+    @GestureState private var pinch: CGFloat = 1
+    @State private var committedPan: CGSize = .zero
+    @GestureState private var dragPan: CGSize = .zero
+
+    private static let minZoom: CGFloat = 1
+    private static let maxZoom: CGFloat = 10
+
+    private var liveZoom: CGFloat {
+        min(Self.maxZoom, max(Self.minZoom, committedZoom * pinch))
+    }
+    private var liveOffset: CGSize {
+        CGSize(width: committedPan.width + dragPan.width, height: committedPan.height + dragPan.height)
+    }
+
     var body: some View {
         GeometryReader { proxy in
-            let transform = MapTransform(map: map, size: proxy.size)
+            let transform = MapTransform(map: map, size: proxy.size, zoom: liveZoom, pan: liveOffset)
             ZStack(alignment: .topLeading) {
                 if let image = floorPlanImage() {
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: map.widthMeters * transform.scale, height: map.heightMeters * transform.scale)
-                        .clipped()
                         .offset(x: transform.xOffset, y: transform.yOffset)
                         .opacity(0.72)
                 }
@@ -325,12 +369,42 @@ struct FloorPlanHeatmapCanvas: View {
                     drawBackground(in: &context, size: size, hasImage: floorPlanImage() != nil)
                     drawWalkableAreas(in: &context, transform: transform)
                     drawHeatmap(in: &context, transform: transform)
-                    drawRooms(in: &context, transform: transform)
+                    drawRooms(in: &context, transform: transform, zoom: liveZoom)
                     drawWalls(in: &context, transform: transform)
-                    drawEntrances(in: &context, transform: transform)
-                    drawAlignmentPoints(in: &context, transform: transform)
+                    drawEntrances(in: &context, transform: transform, zoom: liveZoom)
+                    drawAlignmentPoints(in: &context, transform: transform, zoom: liveZoom)
                     drawRuntimeEstimate(in: &context, transform: transform)
                     drawCurrentPoint(in: &context, transform: transform)
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
+            .contentShape(Rectangle())
+            .gesture(
+                MagnificationGesture()
+                    .updating($pinch) { value, state, _ in state = value }
+                    .onEnded { value in
+                        committedZoom = min(Self.maxZoom, max(Self.minZoom, committedZoom * value))
+                        if committedZoom <= Self.minZoom { committedPan = .zero }
+                    }
+            )
+            // Pan only matters while zoomed in; at 1x the drag is a no-op so the
+            // surrounding ScrollView keeps working.
+            .simultaneousGesture(
+                DragGesture()
+                    .updating($dragPan) { value, state, _ in
+                        if committedZoom > Self.minZoom { state = value.translation }
+                    }
+                    .onEnded { value in
+                        guard committedZoom > Self.minZoom else { return }
+                        committedPan.width += value.translation.width
+                        committedPan.height += value.translation.height
+                    }
+            )
+            .onTapGesture(count: 2) {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    committedZoom = Self.minZoom
+                    committedPan = .zero
                 }
             }
             .overlay(alignment: .bottomLeading) {
@@ -341,7 +415,24 @@ struct FloorPlanHeatmapCanvas: View {
                     .background(.thinMaterial, in: Capsule())
                     .padding(10)
             }
-            .accessibilityLabel("2D floor plan heatmap")
+            .overlay(alignment: .topTrailing) {
+                if liveZoom > Self.minZoom + 0.01 {
+                    Text(String(format: "%.1f×", liveZoom))
+                        .font(.caption2.monospacedDigit().weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.thinMaterial, in: Capsule())
+                        .padding(10)
+                } else {
+                    Text("pinch to zoom · drag to pan · double-tap to reset")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(8)
+                        .background(.thinMaterial, in: Capsule())
+                        .padding(10)
+                }
+            }
+            .accessibilityLabel("2D floor plan heatmap, pinch to zoom and drag to pan")
         }
     }
 
@@ -383,7 +474,9 @@ struct FloorPlanHeatmapCanvas: View {
             case .magneticFieldChange:
                 color = magneticChangeColor(min(1, cell.magneticChangeUT / maxChange))
             }
-            context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(color))
+            let cellPath = Path(roundedRect: rect, cornerRadius: 2)
+            context.fill(cellPath, with: .color(color))
+            context.stroke(cellPath, with: .color(.black.opacity(0.25)), lineWidth: 0.5)
         }
     }
 
@@ -399,7 +492,21 @@ struct FloorPlanHeatmapCanvas: View {
         }
     }
 
-    private func drawRooms(in context: inout GraphicsContext, transform: MapTransform) {
+    // Labels are only legible once zoomed in; below these thresholds we draw markers
+    // only, so a dense venue doesn't pile every name on top of each other at 1x.
+    private static let roomLabelZoom: CGFloat = 1.8
+    private static let pointLabelZoom: CGFloat = 2.2
+
+    private func chip(_ text: Text, at point: CGPoint, in context: inout GraphicsContext) {
+        let resolved = context.resolve(text)
+        let size = resolved.measure(in: CGSize(width: 400, height: 100))
+        let rect = CGRect(x: point.x - size.width / 2 - 4, y: point.y - size.height / 2 - 2,
+                          width: size.width + 8, height: size.height + 4)
+        context.fill(Path(roundedRect: rect, cornerRadius: 4), with: .color(Color.mapSecondaryGroupedBackground.opacity(0.85)))
+        context.draw(resolved, at: point, anchor: .center)
+    }
+
+    private func drawRooms(in context: inout GraphicsContext, transform: MapTransform, zoom: CGFloat) {
         for room in map.rooms {
             var path = Path()
             guard let first = room.polygon.first else { continue }
@@ -410,22 +517,24 @@ struct FloorPlanHeatmapCanvas: View {
             path.closeSubpath()
             context.stroke(path, with: .color(.primary.opacity(0.65)), lineWidth: 1.4)
 
-            if let centroid = centroid(room.polygon) {
-                let resolved = context.resolve(Text(room.name).font(.caption.bold()).foregroundStyle(.primary))
-                context.draw(resolved, at: transform.point(centroid), anchor: .center)
+            if zoom >= Self.roomLabelZoom, let centroid = centroid(room.polygon) {
+                chip(Text(room.name).font(.caption2.bold()).foregroundStyle(.primary),
+                     at: transform.point(centroid), in: &context)
             }
         }
     }
 
-    private func drawEntrances(in context: inout GraphicsContext, transform: MapTransform) {
+    private func drawEntrances(in context: inout GraphicsContext, transform: MapTransform, zoom: CGFloat) {
         for entrance in map.entrances {
             let p = transform.point(entrance.point)
-            let marker = CGRect(x: p.x - 6, y: p.y - 6, width: 12, height: 12)
+            let marker = CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10)
             context.fill(Path(ellipseIn: marker), with: .color(.blue))
-            context.stroke(Path(ellipseIn: marker.insetBy(dx: -2, dy: -2)), with: .color(.white), lineWidth: 2)
+            context.stroke(Path(ellipseIn: marker.insetBy(dx: -2, dy: -2)), with: .color(.white), lineWidth: 1.5)
 
-            let label = context.resolve(Text(entrance.name).font(.caption2.weight(.semibold)).foregroundStyle(.blue))
-            context.draw(label, at: CGPoint(x: p.x + 8, y: p.y), anchor: .leading)
+            if zoom >= Self.pointLabelZoom {
+                let label = context.resolve(Text(entrance.name).font(.caption2.weight(.semibold)).foregroundStyle(.blue))
+                context.draw(label, at: CGPoint(x: p.x + 9, y: p.y), anchor: .leading)
+            }
         }
     }
 
@@ -438,7 +547,7 @@ struct FloorPlanHeatmapCanvas: View {
         }
     }
 
-    private func drawAlignmentPoints(in context: inout GraphicsContext, transform: MapTransform) {
+    private func drawAlignmentPoints(in context: inout GraphicsContext, transform: MapTransform, zoom: CGFloat) {
         for alignment in map.alignmentPoints {
             let p = transform.point(alignment.point)
             var cross = Path()
@@ -448,8 +557,10 @@ struct FloorPlanHeatmapCanvas: View {
             cross.addLine(to: CGPoint(x: p.x, y: p.y + 6))
             context.stroke(cross, with: .color(.purple), lineWidth: 2)
 
-            let label = context.resolve(Text(alignment.name).font(.caption2.weight(.semibold)).foregroundStyle(.purple))
-            context.draw(label, at: CGPoint(x: p.x + 8, y: p.y + 8), anchor: .leading)
+            if zoom >= Self.pointLabelZoom {
+                let label = context.resolve(Text(alignment.name).font(.caption2.weight(.semibold)).foregroundStyle(.purple))
+                context.draw(label, at: CGPoint(x: p.x + 8, y: p.y + 8), anchor: .leading)
+            }
         }
     }
 
@@ -474,18 +585,21 @@ struct FloorPlanHeatmapCanvas: View {
         context.fill(Path(ellipseIn: dot), with: .color(.indigo))
     }
 
+    // Coverage ramp: red = sparse data, green = enough. High, opaque alpha so cells
+    // read clearly over the dark background and the dimmed floor-plan image.
     private func surveyStrengthColor(_ score: Double) -> Color {
-        if score < 0.25 { return Color.gray.opacity(0.22) }
-        if score < 0.5 { return Color.yellow.opacity(0.42) }
-        if score < 0.75 { return Color.green.opacity(0.48) }
-        return Color.green.opacity(0.74)
+        if score < 0.25 { return Color(red: 0.90, green: 0.20, blue: 0.20).opacity(0.78) }
+        if score < 0.5 { return Color.orange.opacity(0.82) }
+        if score < 0.75 { return Color.yellow.opacity(0.85) }
+        return Color.green.opacity(0.9)
     }
 
+    // Magnetic-texture ramp: blue = flat/weak, red = strong texture (best for the filter).
     private func magneticChangeColor(_ score: Double) -> Color {
-        if score < 0.2 { return Color.blue.opacity(0.24) }
-        if score < 0.45 { return Color.cyan.opacity(0.34) }
-        if score < 0.7 { return Color.orange.opacity(0.48) }
-        return Color.red.opacity(0.66)
+        if score < 0.2 { return Color.blue.opacity(0.7) }
+        if score < 0.45 { return Color.cyan.opacity(0.8) }
+        if score < 0.7 { return Color.orange.opacity(0.85) }
+        return Color.red.opacity(0.9)
     }
 
     private func centroid(_ polygon: [MapPoint2D]) -> MapPoint2D? {
@@ -503,13 +617,15 @@ private struct MapTransform {
     let xOffset: Double
     let yOffset: Double
 
-    init(map: VenueMap2D, size: CGSize) {
+    init(map: VenueMap2D, size: CGSize, zoom: CGFloat = 1, pan: CGSize = .zero) {
         self.map = map
         let sx = size.width / max(map.widthMeters, 1)
         let sy = size.height / max(map.heightMeters, 1)
-        scale = min(sx, sy)
-        xOffset = (size.width - map.widthMeters * scale) / 2
-        yOffset = (size.height - map.heightMeters * scale) / 2
+        // Fold zoom into the scale so geometry is drawn natively (crisp text/markers
+        // at constant screen size), instead of rasterizing then magnifying.
+        scale = min(sx, sy) * Double(zoom)
+        xOffset = (size.width - map.widthMeters * scale) / 2 + Double(pan.width)
+        yOffset = (size.height - map.heightMeters * scale) / 2 + Double(pan.height)
     }
 
     func point(_ p: MapPoint2D) -> CGPoint {

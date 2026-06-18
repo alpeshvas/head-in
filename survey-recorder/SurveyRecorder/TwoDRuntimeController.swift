@@ -78,7 +78,7 @@ final class TwoDRuntimeController {
         let feature = MagneticFeature2D.from(
             magneticVector: Vector3D(x: mag.x, y: mag.y, z: mag.z),
             gravityVector: Vector3D(x: gravity.x, y: gravity.y, z: gravity.z),
-            accuracyRawValue: motion.magneticField.accuracy.rawValue
+            accuracyRawValue: Int(motion.magneticField.accuracy.rawValue)
         )
 
         guard stepDetector.addSample(t: timestamp, magnitude: uaMagnitude) else { return }
