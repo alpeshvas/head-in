@@ -59,6 +59,20 @@ overlaid traces. STRONG (r >= 0.8) means magnetic fingerprinting is viable on
 that route; WEAK means the venue is magnetically hostile and no matcher will
 fix it.
 
+## PDR + Magnetic Replay Prototype
+
+After collecting 3+ sessions, run a leave-one-session-out replay that builds a
+fingerprint from the other passes, estimates route progress from accelerometer
+step peaks, and uses magnetic matching as a correction near the PDR prior:
+
+```sh
+npm run position -- session1.jsonl session2.jsonl session3.jsonl --out analysis/pdr-report.html
+```
+
+This is not a production tracker yet. With only Start/End anchors, its error
+metric is measured against normalized replay time. Add intermediate anchors to
+validate real checkpoint/position error.
+
 ## Notes
 
 - No venue-installed hardware.

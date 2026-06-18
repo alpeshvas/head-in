@@ -9,4 +9,7 @@ DerivedData/
 *.xcuserdatad/
 
 # Analysis output
-analysis/report.html
+analysis/*.html
+
+# Local build output
+build/

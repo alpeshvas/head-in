@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "analyze": "node analysis/analyze-repeatability.js",
+    "position": "node analysis/pdr-assisted-positioning.js",
     "test": "echo \"No tests configured yet\""
   },
   "keywords": [
