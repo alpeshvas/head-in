@@ -40,6 +40,8 @@ final class TwoDRuntimeController {
     @ObservationIgnored private var latestStepFeatureIsUsable = false
     @ObservationIgnored private var lastStepFeature: MagneticFeature2D?
     @ObservationIgnored private var recentStepYawDeltas: [Double] = []
+    @ObservationIgnored private var recentStepIntervals: [Double] = []
+    @ObservationIgnored private var lastStepTimestamp: TimeInterval?
     @ObservationIgnored private let debugWriter: TwoDRuntimeDebugWriter?
 
     init(
@@ -90,6 +92,8 @@ final class TwoDRuntimeController {
         latestStepFeatureIsUsable = false
         lastStepFeature = nil
         recentStepYawDeltas = []
+        recentStepIntervals = []
+        lastStepTimestamp = nil
         stepDetector.reset()
         if let filter { updateRuntimeDiagnostics(filter: filter) }
         if let filter, let estimate {
@@ -176,18 +180,32 @@ final class TwoDRuntimeController {
         detectedSteps += 1
         updateStepDifference()
         let stepYawDelta = pendingYawDelta
+        let stepTimestamp = previousMotionTimestamp ?? ProcessInfo.processInfo.systemUptime
+        // Step interval + rolling-median cadence feed the adaptive stride.
+        // median(_:) is the private helper at the bottom of this file.
+        let stepInterval = lastStepTimestamp.map { max(0, stepTimestamp - $0) } ?? 0
+        if stepInterval > 0 {
+            recentStepIntervals.append(stepInterval)
+            let window = ParticleFilter2DParams.recentStepIntervalWindow
+            if recentStepIntervals.count > window { recentStepIntervals.removeFirst(recentStepIntervals.count - window) }
+        }
+        let medianInterval = median(recentStepIntervals)
         debugWriter?.writeStep(
             index: detectedSteps,
-            timestamp: previousMotionTimestamp ?? ProcessInfo.processInfo.systemUptime,
+            timestamp: stepTimestamp,
             yawDeltaRadians: stepYawDelta,
             appleSteps: applePedometerSteps,
-            rejectedPeaks: rejectedStepCandidateCount
+            rejectedPeaks: rejectedStepCandidateCount,
+            stepIntervalSec: stepInterval,
+            medianStepIntervalSec: medianInterval
         )
+        lastStepTimestamp = stepTimestamp
         recentStepYawDeltas.append(stepYawDelta)
-        if recentStepYawDeltas.count > 2 { recentStepYawDeltas.removeFirst(recentStepYawDeltas.count - 2) }
-        let twoStepYawDelta = recentStepYawDeltas.reduce(0, +)
-        let turnSignalYawDelta = abs(twoStepYawDelta) >= ParticleFilter2DParams.turnRecoveryThresholdRadians ? twoStepYawDelta : stepYawDelta
-        filter.predictStep(gyroDeltaRadians: stepYawDelta, turnSignalRadians: turnSignalYawDelta)
+        let maxYawWindowSteps = ParticleFilter2DParams.turnRecoveryWindowSteps
+        if recentStepYawDeltas.count > maxYawWindowSteps { recentStepYawDeltas.removeFirst(recentStepYawDeltas.count - maxYawWindowSteps) }
+        let windowYawDelta = recentStepYawDeltas.reduce(0, +)
+        let turnSignalYawDelta = abs(windowYawDelta) >= ParticleFilter2DParams.turnRecoveryWindowThresholdRadians ? windowYawDelta : stepYawDelta
+        filter.predictStep(gyroDeltaRadians: stepYawDelta, turnSignalRadians: turnSignalYawDelta, stepIntervalSeconds: stepInterval, recentMedianStepIntervalSeconds: medianInterval)
         lastStepYawDeltaDegrees = stepYawDelta * 180 / .pi
         turnRecoveryParticleCount = filter.lastTurnRecoveryParticleCount
         pendingYawDelta = 0

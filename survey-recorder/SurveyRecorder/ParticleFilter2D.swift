@@ -19,8 +19,8 @@ struct ParticleEstimate2D: Hashable {
 enum ParticleFilter2DParams {
     static let particleCount = 1_500
     static let initialRadiusMeters = 1.8
-    static let stepLengthMeters = 0.74
-    static let stepLengthSigmaMeters = 0.22
+    static let stepLengthMeters = 0.62
+    static let stepLengthSigmaMeters = 0.15
     static let headingSigmaRadians = 12.0 * Double.pi / 180.0
     static let wallPenalty = 0.001
     static let outsidePenalty = 0.0001
@@ -34,9 +34,37 @@ enum ParticleFilter2DParams {
     static let surveyedCellPenaltyFloor = 0.02
     static let resampleNeffFraction = 0.5
     static let turnRecoveryThresholdRadians = 35.0 * Double.pi / 180.0
+    static let turnRecoveryWindowSteps = 4
+    static let turnRecoveryWindowThresholdRadians = 50.0 * Double.pi / 180.0
     static let turnRecoveryMaxParticleFraction = 0.18
     static let turnRecoveryPositionJitterMeters = 0.45
     static let turnRecoveryHeadingSigmaRadians = 35.0 * Double.pi / 180.0
+    // Adaptive step length (Phase A+B). When stepIntervalSeconds and
+    // recentMedianStepIntervalSeconds are both > 0, predictStep scales the
+    // sampled stride by a relative cadence factor (slow steps -> shorter
+    // stride, missed/merged steps -> longer stride to recover), an absolute
+    // cadence factor (a session that is globally slower than the reference
+    // cadence produces shorter strides), and a turn-shrink factor (high yaw
+    // -> shorter stride, matching observed gait).
+    static let stepLengthCadenceClampMin = 0.5
+    static let stepLengthCadenceClampMax = 2.5
+    static let stepLengthTurnShrinkK = 0.6
+    static let stepLengthTurnShrinkMaxRadians = 60.0 * Double.pi / 180.0
+    static let stepLengthTurnShrinkFloor = 0.3
+    static let recentStepIntervalWindow = 8
+    // Absolute-cadence reference (slow-walking fix). Scales stride by
+    // referenceStepIntervalSeconds / recentMedianStepIntervalSeconds so a
+    // session that is globally slower than the reference cadence produces
+    // shorter strides. sessionCadenceClampMax = 1.0 is a safety gate: the
+    // term can only shrink strides, never grow them, so a fast walk is
+    // untouched. At normal cadence (medianDt == reference) the scale is 1.0.
+    static let referenceStepIntervalSeconds = 0.7
+    static let sessionCadenceClampMin = 0.3
+    static let sessionCadenceClampMax = 1.0
+    // Continuous heading sigma. predictionHeadingSigma returns
+    // min(cap, base + headingSigmaTurnK * |turn|) for all turn magnitudes
+    // instead of the legacy hard threshold at turnRecoveryThresholdRadians.
+    static let headingSigmaTurnK = 0.4
 }
 
 enum ParticleObservationMode2D: String, CaseIterable, Identifiable {
@@ -98,17 +126,18 @@ final class ParticleFilter2D {
         normalize()
     }
 
-    func predictStep(gyroDeltaRadians: Double, turnSignalRadians: Double? = nil) {
+    func predictStep(gyroDeltaRadians: Double, turnSignalRadians: Double? = nil, stepIntervalSeconds: Double = 0, recentMedianStepIntervalSeconds: Double = 0) {
         let turnSignalRadians = turnSignalRadians ?? gyroDeltaRadians
         lastTurnYawRadians = gyroDeltaRadians
         lastTurnRecoveryParticleCount = 0
         let previousEstimate = estimate.point
         let previousHeading = weightedMeanHeading()
         let headingSigma = predictionHeadingSigma(for: turnSignalRadians)
+        let stepScale = stepLengthScale(gyroDeltaRadians: gyroDeltaRadians, stepIntervalSeconds: stepIntervalSeconds, recentMedianStepIntervalSeconds: recentMedianStepIntervalSeconds)
         for i in particles.indices {
             let old = particles[i]
             let heading = old.headingRadians + gyroDeltaRadians + rng.normal(mean: 0, sigma: headingSigma)
-            let step = max(0.2, rng.normal(mean: ParticleFilter2DParams.stepLengthMeters, sigma: ParticleFilter2DParams.stepLengthSigmaMeters))
+            let step = max(0.2, rng.normal(mean: ParticleFilter2DParams.stepLengthMeters, sigma: ParticleFilter2DParams.stepLengthSigmaMeters) * stepScale)
             let nx = old.x + step * cos(heading)
             let ny = old.y + step * sin(heading)
             var weight = old.weight
@@ -116,7 +145,7 @@ final class ParticleFilter2D {
             if crossesWall(from: MapPoint2D(x: old.x, y: old.y), to: MapPoint2D(x: nx, y: ny)) { weight *= ParticleFilter2DParams.wallPenalty }
             particles[i] = Particle2D(x: nx, y: ny, headingRadians: heading, weight: weight, previousX: old.x, previousY: old.y)
         }
-        injectTurnRecoveryParticles(from: previousEstimate, previousHeading: previousHeading, turnSignalRadians: turnSignalRadians)
+        injectTurnRecoveryParticles(from: previousEstimate, previousHeading: previousHeading, turnSignalRadians: turnSignalRadians, stepScale: stepScale)
         applySurveyedCellPrior()
         normalize()
         if effectiveParticleCount < Double(particles.count) * ParticleFilter2DParams.resampleNeffFraction { resample() }
@@ -266,6 +295,12 @@ final class ParticleFilter2D {
     }
 
     private func predictionHeadingSigma(for gyroDeltaRadians: Double) -> Double {
+        if ParticleFilter2DParams.headingSigmaTurnK > 0 {
+            return min(
+                ParticleFilter2DParams.turnRecoveryHeadingSigmaRadians,
+                ParticleFilter2DParams.headingSigmaRadians + ParticleFilter2DParams.headingSigmaTurnK * abs(gyroDeltaRadians)
+            )
+        }
         guard abs(gyroDeltaRadians) >= ParticleFilter2DParams.turnRecoveryThresholdRadians else {
             return ParticleFilter2DParams.headingSigmaRadians
         }
@@ -275,7 +310,50 @@ final class ParticleFilter2D {
         )
     }
 
-    private func injectTurnRecoveryParticles(from previousEstimate: MapPoint2D, previousHeading: Double, turnSignalRadians: Double) {
+    /// Per-step stride scale from cadence (relative + absolute) and turn
+    /// magnitude. Returns 1.0 when no interval signal is available.
+    /// `gyroDeltaRadians` is the single-step yaw (turn-shrink is driven by
+    /// per-step rotation, not the windowed turn signal).
+    private func stepLengthScale(gyroDeltaRadians: Double, stepIntervalSeconds: Double, recentMedianStepIntervalSeconds: Double) -> Double {
+        var scale = 1.0
+        if stepIntervalSeconds > 0, recentMedianStepIntervalSeconds > 0 {
+            // Relative cadence: this step vs this session's own rhythm.
+            // >1 recovers a missed/merged step; <1 shortens a fast step.
+            let lo = ParticleFilter2DParams.stepLengthCadenceClampMin
+            let hi = ParticleFilter2DParams.stepLengthCadenceClampMax
+            let cadenceRatio: Double
+            if hi >= lo, lo > 0 {
+                cadenceRatio = min(hi, max(lo, stepIntervalSeconds / recentMedianStepIntervalSeconds))
+            } else {
+                cadenceRatio = 1.0
+            }
+            scale *= cadenceRatio
+            // Absolute cadence: shrink stride when the whole session is
+            // slower than the reference cadence. sessionCadenceClampMax = 1.0
+            // is a safety gate — the term can only shrink, never grow, so
+            // normal/fast walks are untouched.
+            let ref = ParticleFilter2DParams.referenceStepIntervalSeconds
+            if ref > 0 {
+                let slo = ParticleFilter2DParams.sessionCadenceClampMin
+                let shi = ParticleFilter2DParams.sessionCadenceClampMax
+                let sessionRatio: Double
+                if shi >= slo, slo > 0 {
+                    sessionRatio = min(shi, max(slo, ref / recentMedianStepIntervalSeconds))
+                } else {
+                    sessionRatio = 1.0
+                }
+                scale *= sessionRatio
+            }
+        }
+        if ParticleFilter2DParams.stepLengthTurnShrinkK > 0 {
+            let yaw = min(abs(gyroDeltaRadians), ParticleFilter2DParams.stepLengthTurnShrinkMaxRadians)
+            let shrink = max(ParticleFilter2DParams.stepLengthTurnShrinkFloor, 1 - ParticleFilter2DParams.stepLengthTurnShrinkK * yaw)
+            scale *= shrink
+        }
+        return scale
+    }
+
+    private func injectTurnRecoveryParticles(from previousEstimate: MapPoint2D, previousHeading: Double, turnSignalRadians: Double, stepScale: Double = 1.0) {
         let turnAmount = abs(turnSignalRadians)
         guard turnAmount >= ParticleFilter2DParams.turnRecoveryThresholdRadians, !particles.isEmpty else { return }
         let fraction = min(
@@ -288,7 +366,7 @@ final class ParticleFilter2D {
         for index in replacementIndices {
             let turnProgress = 0.35 + 0.9 * rng.nextUnit()
             let heading = previousHeading + turnSignalRadians * turnProgress + rng.normal(mean: 0, sigma: ParticleFilter2DParams.turnRecoveryHeadingSigmaRadians)
-            let step = max(0.2, rng.normal(mean: ParticleFilter2DParams.stepLengthMeters, sigma: ParticleFilter2DParams.stepLengthSigmaMeters))
+            let step = max(0.2, rng.normal(mean: ParticleFilter2DParams.stepLengthMeters, sigma: ParticleFilter2DParams.stepLengthSigmaMeters) * stepScale)
             let lateral = rng.normal(mean: 0, sigma: ParticleFilter2DParams.turnRecoveryPositionJitterMeters)
             let point = MapPoint2D(
                 x: previousEstimate.x + step * cos(heading) - lateral * sin(heading),

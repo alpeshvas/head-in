@@ -130,15 +130,18 @@ final class TwoDRuntimeDebugWriter {
         ])
     }
 
-    func writeStep(index: Int, timestamp: TimeInterval, yawDeltaRadians: Double, appleSteps: Int, rejectedPeaks: Int) {
-        writeLine([
+    func writeStep(index: Int, timestamp: TimeInterval, yawDeltaRadians: Double, appleSteps: Int, rejectedPeaks: Int, stepIntervalSec: Double = 0, medianStepIntervalSec: Double = 0) {
+        var line: [String: Any] = [
             "type": "step",
             "t": jsonRound(timestamp),
             "index": index,
             "yawDeltaDeg": jsonRound(yawDeltaRadians * 180 / .pi, 3),
             "appleSteps": appleSteps,
             "rejectedPeaks": rejectedPeaks,
-        ])
+        ]
+        if stepIntervalSec > 0 { line["stepIntervalSec"] = jsonRound(stepIntervalSec, 4) }
+        if medianStepIntervalSec > 0 { line["medianStepIntervalSec"] = jsonRound(medianStepIntervalSec, 4) }
+        writeLine(line)
     }
 
     func writeRejectedPeak(timestamp: TimeInterval, rejectedPeaks: Int) {
@@ -258,6 +261,15 @@ final class TwoDRuntimeDebugWriter {
             "surveyedCellNoPenaltyDistanceMeters": ParticleFilter2DParams.surveyedCellNoPenaltyDistanceMeters,
             "surveyedCellDistanceSigmaMeters": ParticleFilter2DParams.surveyedCellDistanceSigmaMeters,
             "surveyedCellPenaltyFloor": ParticleFilter2DParams.surveyedCellPenaltyFloor,
+            "stepLengthCadenceClampMin": ParticleFilter2DParams.stepLengthCadenceClampMin,
+            "stepLengthCadenceClampMax": ParticleFilter2DParams.stepLengthCadenceClampMax,
+            "stepLengthTurnShrinkK": ParticleFilter2DParams.stepLengthTurnShrinkK,
+            "stepLengthTurnShrinkFloor": ParticleFilter2DParams.stepLengthTurnShrinkFloor,
+            "recentStepIntervalWindow": ParticleFilter2DParams.recentStepIntervalWindow,
+            "referenceStepIntervalSeconds": ParticleFilter2DParams.referenceStepIntervalSeconds,
+            "sessionCadenceClampMin": ParticleFilter2DParams.sessionCadenceClampMin,
+            "sessionCadenceClampMax": ParticleFilter2DParams.sessionCadenceClampMax,
+            "headingSigmaTurnK": ParticleFilter2DParams.headingSigmaTurnK,
         ]
     }
 
