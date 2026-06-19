@@ -38,6 +38,7 @@ struct RouteMapCanvas: View {
     let pathData: RoutePathData
     var showBadges = true
     @State private var pulse = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let st = routeMapState(controller)
@@ -90,9 +91,14 @@ struct RouteMapCanvas: View {
                 if controller.isRunning || controller.isComplete {
                     let p = clamped(point(atBin: clampBin(controller.displayBin), t: t), in: geo.size, inset: 10)
                     ZStack {
-                        Circle().fill(st.color.opacity(0.22))
-                            .frame(width: 34, height: 34)
-                            .scaleEffect(pulse ? 1.25 : 0.7).opacity(pulse ? 0.0 : 0.6)
+                        if reduceMotion {
+                            // Static halo when motion is reduced (no infinite pulse).
+                            Circle().stroke(st.color.opacity(0.45), lineWidth: 2).frame(width: 26, height: 26)
+                        } else {
+                            Circle().fill(st.color.opacity(0.22))
+                                .frame(width: 34, height: 34)
+                                .scaleEffect(pulse ? 1.25 : 0.7).opacity(pulse ? 0.0 : 0.6)
+                        }
                         Circle().fill(st.color).frame(width: 13, height: 13)
                             .overlay(Circle().stroke(Instrument.ink, lineWidth: 2))
                             .shadow(color: st.color, radius: 6)
@@ -102,6 +108,7 @@ struct RouteMapCanvas: View {
             }
         }
         .onAppear {
+            guard !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) { pulse = true }
         }
     }
@@ -152,7 +159,7 @@ struct RouteMapLegend: View {
                         .overlay(Circle().stroke(reached ? Instrument.phosphor : Instrument.hairline, lineWidth: 1))
                     Text(cp.name)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(reached ? Instrument.textPrimary : Instrument.textTertiary)
+                        .foregroundStyle(reached ? Instrument.textPrimary : Instrument.textSecondary)
                         .lineLimit(1).truncationMode(.tail)
                 }
             }
@@ -175,13 +182,16 @@ struct RouteMapView: View {
                 InstrumentChip(text: st.label, color: st.color)
                 Button { fullScreen = true } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(Instrument.textSecondary)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 30, height: 30)
                         .background(Instrument.panel, in: RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Instrument.hairline, lineWidth: 1))
+                        .frame(width: 44, height: 44)          // 44pt touch target
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Expand map")
             }
             RouteMapCanvas(controller: controller, pathData: pathData)
                 .frame(height: 188)
@@ -191,8 +201,8 @@ struct RouteMapView: View {
                 .onTapGesture { fullScreen = true }
             RouteMapLegend(controller: controller, pathData: pathData)
             Text("tap to expand · marker rides surveyed path · band = ±2σ along route")
-                .font(.system(size: 9, weight: .regular, design: .monospaced))
-                .foregroundStyle(Instrument.textTertiary)
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundStyle(Instrument.textSecondary)
         }
         .fullScreenCover(isPresented: $fullScreen) {
             RouteMapFullScreen(controller: controller, pathData: pathData)
@@ -220,13 +230,16 @@ private struct RouteMapFullScreen: View {
                     InstrumentChip(text: routeMapState(controller).label, color: routeMapState(controller).color)
                     Button { dismiss() } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .bold))
+                            .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(Instrument.textPrimary)
-                            .frame(width: 34, height: 34)
+                            .frame(width: 36, height: 36)
                             .background(Instrument.panel, in: Circle())
                             .overlay(Circle().stroke(Instrument.hairline, lineWidth: 1))
+                            .frame(width: 44, height: 44)          // 44pt touch target
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain).padding(.leading, 4)
+                    .accessibilityLabel("Close map")
                 }
                 RouteMapCanvas(controller: controller, pathData: pathData)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

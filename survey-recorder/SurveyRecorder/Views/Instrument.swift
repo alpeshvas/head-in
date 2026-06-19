@@ -9,14 +9,15 @@ enum Instrument {
     static let hairline   = Color(red: 0.16,  green: 0.20,  blue: 0.255) // borders
     static let grid       = Color(red: 0.105, green: 0.135, blue: 0.175) // blueprint lines
 
-    static let textPrimary   = Color(red: 0.90, green: 0.93, blue: 0.965)
-    static let textSecondary = Color(red: 0.55, green: 0.62, blue: 0.70)
-    static let textTertiary  = Color(red: 0.36, green: 0.43, blue: 0.51)
+    // Tuned for WCAG AA on the dark panels: secondary ~6:1, tertiary ~4:1.
+    static let textPrimary   = Color(red: 0.91, green: 0.94, blue: 0.97)
+    static let textSecondary = Color(red: 0.64, green: 0.71, blue: 0.79) // essential labels
+    static let textTertiary  = Color(red: 0.50, green: 0.57, blue: 0.65) // non-essential only
 
     static let phosphor = Color(red: 0.36, green: 0.94, blue: 0.74) // signal / on-route
-    static let amber    = Color(red: 0.98, green: 0.74, blue: 0.33) // holding / pacing
-    static let coral    = Color(red: 1.00, green: 0.44, blue: 0.44) // off-route / alert
-    static let steel    = Color(red: 0.28, green: 0.34, blue: 0.42) // dim / untravelled
+    static let amber    = Color(red: 0.99, green: 0.78, blue: 0.40) // holding / pacing
+    static let coral    = Color(red: 1.00, green: 0.50, blue: 0.50) // off-route / alert
+    static let steel    = Color(red: 0.38, green: 0.45, blue: 0.55) // dim / untravelled (≥3:1 graphic)
 }
 
 /// Dark instrument backdrop: ink base + a phosphor aurora glow up top + a faint
@@ -71,7 +72,8 @@ extension View {
     func instrumentPanel(padding: CGFloat = 16) -> some View { modifier(InstrumentPanel(padding: padding)) }
 
     /// Tracked, uppercase, monospaced micro-label — the instrument annotation voice.
-    func monoTag(_ color: Color = Instrument.textTertiary) -> some View {
+    /// Defaults to the AA-readable secondary tone (these labels are essential).
+    func monoTag(_ color: Color = Instrument.textSecondary) -> some View {
         font(.system(size: 10, weight: .semibold, design: .monospaced))
             .tracking(1.6).textCase(.uppercase).foregroundStyle(color)
     }
@@ -98,23 +100,34 @@ struct InstrumentChip: View {
 }
 
 /// Primary action: phosphor-edged instrument button that fills on press.
+/// Min 48pt tall (touch target) and visibly dims when disabled.
 struct InstrumentButtonStyle: ButtonStyle {
     var tint: Color = Instrument.phosphor
     var prominent: Bool = true
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 15, weight: .bold, design: .monospaced))
-            .tracking(1.2).textCase(.uppercase)
-            .foregroundStyle(prominent ? Instrument.ink : tint)
-            .frame(maxWidth: .infinity).padding(.vertical, 14)
-            .background(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(prominent ? tint : tint.opacity(configuration.isPressed ? 0.22 : 0.10))
-            )
-            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(tint, lineWidth: prominent ? 0 : 1.2))
-            .shadow(color: prominent ? tint.opacity(0.5) : .clear, radius: configuration.isPressed ? 4 : 12)
-            .opacity(configuration.isPressed ? 0.9 : 1)
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+        InstrumentButtonLabel(configuration: configuration, tint: tint, prominent: prominent)
+    }
+
+    private struct InstrumentButtonLabel: View {
+        let configuration: Configuration
+        let tint: Color
+        let prominent: Bool
+        @Environment(\.isEnabled) private var isEnabled
+        var body: some View {
+            configuration.label
+                .font(.system(size: 15, weight: .bold, design: .monospaced))
+                .tracking(1.2).textCase(.uppercase)
+                .foregroundStyle(prominent ? Instrument.ink : tint)
+                .frame(maxWidth: .infinity, minHeight: 48).padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(prominent ? tint : tint.opacity(configuration.isPressed ? 0.22 : 0.10))
+                )
+                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(tint, lineWidth: prominent ? 0 : 1.2))
+                .shadow(color: prominent && isEnabled ? tint.opacity(0.5) : .clear, radius: configuration.isPressed ? 4 : 12)
+                .opacity(isEnabled ? (configuration.isPressed ? 0.9 : 1) : 0.4)
+                .scaleEffect(configuration.isPressed ? 0.985 : 1)
+                .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+        }
     }
 }
