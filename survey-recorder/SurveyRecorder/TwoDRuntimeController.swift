@@ -136,7 +136,7 @@ final class TwoDRuntimeController {
             acceptStep(filter: filter)
         case .rejected:
             rejectedStepCandidateCount += 1
-        case .candidate, .none:
+        case .none:
             break
         }
     }
@@ -221,7 +221,6 @@ final class TwoDRuntimeController {
 
 private enum StepDetector2DResult {
     case none
-    case candidate
     case accepted
     case rejected
 }
@@ -232,19 +231,16 @@ private struct StepDetector2D {
         let value: Double
     }
 
-    private static let minStepIntervalSeconds = 0.42
-    private static let maxStepIntervalSeconds = 1.45
+    private static let minStepIntervalSeconds = 0.34
 
     private var raw: [TimedValue] = []
     private var smoothed: [TimedValue] = []
     private var lastAcceptedStepTime = -Double.infinity
-    private var pendingPeakTime: TimeInterval?
 
     mutating func reset() {
         raw.removeAll(keepingCapacity: true)
         smoothed.removeAll(keepingCapacity: true)
         lastAcceptedStepTime = -Double.infinity
-        pendingPeakTime = nil
     }
 
     mutating func addSample(t: TimeInterval, magnitude: Double) -> StepDetector2DResult {
@@ -256,11 +252,6 @@ private struct StepDetector2D {
         if smoothed.count > 160 { smoothed.removeFirst(smoothed.count - 160) }
         guard smoothed.count >= 5 else { return .none }
 
-        if let pendingPeakTime, t - pendingPeakTime > Self.maxStepIntervalSeconds {
-            self.pendingPeakTime = nil
-            return .rejected
-        }
-
         let candidateIndex = smoothed.count - 2
         let previous = smoothed[candidateIndex - 1]
         let candidate = smoothed[candidateIndex]
@@ -268,21 +259,11 @@ private struct StepDetector2D {
         let recentValues = smoothed.suffix(min(120, smoothed.count)).map(\.value)
         let med = median(recentValues)
         let mad = median(recentValues.map { abs($0 - med) })
-        let threshold = med + max(0.065, 2.0 * (mad == 0 ? 0.03 : mad))
+        let threshold = med + max(0.045, 1.6 * (mad == 0 ? 0.03 : mad))
         let isPeak = candidate.value > previous.value && candidate.value >= next.value && candidate.value > threshold
         guard isPeak else { return .none }
 
         guard candidate.t - lastAcceptedStepTime >= Self.minStepIntervalSeconds else {
-            return .rejected
-        }
-        guard let pendingPeakTime else {
-            self.pendingPeakTime = candidate.t
-            return .candidate
-        }
-
-        let interval = candidate.t - pendingPeakTime
-        self.pendingPeakTime = candidate.t
-        guard interval >= Self.minStepIntervalSeconds && interval <= Self.maxStepIntervalSeconds else {
             return .rejected
         }
         lastAcceptedStepTime = candidate.t
