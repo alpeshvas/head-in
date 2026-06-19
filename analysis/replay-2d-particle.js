@@ -7,7 +7,7 @@
  * heatmap usefulness, and confidence/error reporting before live-device tuning.
  *
  * Usage:
- *   node analysis/replay-2d-particle.js venue-map-with-heatmap.json heldout-2d-survey.jsonl
+ *   node analysis/replay-2d-particle.js venue-map-with-heatmap.json heldout-2d-survey.jsonl [--mode absolute|delta|combo|coverage|legacy]
  */
 
 'use strict';
@@ -21,15 +21,40 @@ const PARAMS = {
   stepSigmaM: 0.22,
   headingSigmaRad: 12 * Math.PI / 180,
   magneticSigmaUT: 3.0,
+  absoluteMagneticSigmaUT: 5.0,
+  deltaMagneticSigmaUT: 3.0,
+  surveyedCellNoPenaltyDistanceM: 0.75,
+  surveyedCellDistanceSigmaM: 0.75,
+  surveyedCellPenaltyFloor: 0.02,
   outsidePenalty: 0.0001,
   wallPenalty: 0.001,
   resampleNeffFraction: 0.5,
   pseudoStepMeters: 0.70,
 };
 
+const MODES = new Set(['absolute', 'delta', 'combo', 'coverage', 'legacy']);
+
 function usage() {
-  console.error('Usage: node analysis/replay-2d-particle.js <venue-map-with-heatmap.json> <2d-survey.jsonl>');
+  console.error('Usage: node analysis/replay-2d-particle.js <venue-map-with-heatmap.json> <2d-survey.jsonl> [--mode absolute|delta|combo|coverage|legacy]');
   process.exit(1);
+}
+
+function parseArgs(argv) {
+  const files = [];
+  let mode = 'absolute';
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--mode') {
+      mode = argv[++i];
+      if (!MODES.has(mode)) throw new Error(`Unknown mode: ${mode}`);
+    } else if (arg.startsWith('--')) {
+      throw new Error(`Unknown option: ${arg}`);
+    } else {
+      files.push(arg);
+    }
+  }
+  if (files.length !== 2) usage();
+  return { mapFile: files[0], sessionFile: files[1], mode };
 }
 
 function readPackage(file) {
@@ -104,34 +129,76 @@ function nearestCell(cells, p) {
   return best;
 }
 
+function nearestCellDistance(cells, p) {
+  const cell = nearestCell(cells, p);
+  if (!cell) return Infinity;
+  return Math.hypot(cell.center.x - p.x, cell.center.y - p.y);
+}
+
 class Filter {
-  constructor(map, cells, start) {
+  constructor(map, cells, start, mode) {
     this.map = map; this.cells = cells; this.rand = mulberry32(0x5eed); this.particles = [];
+    this.mode = mode;
     for (let i = 0; i < PARAMS.particles; i++) {
       const r = PARAMS.initialRadiusM * Math.sqrt(this.rand()), th = 2 * Math.PI * this.rand();
-      this.particles.push({ x: start.x + r * Math.cos(th), y: start.y + r * Math.sin(th), h: 2 * Math.PI * this.rand(), w: 1 / PARAMS.particles });
+      this.particles.push({ x: start.x + r * Math.cos(th), y: start.y + r * Math.sin(th), px: start.x, py: start.y, h: 2 * Math.PI * this.rand(), w: 1 / PARAMS.particles });
     }
     this.normalize();
   }
   predict(headingDelta) {
     for (const p of this.particles) {
       const old = { x: p.x, y: p.y };
+      p.px = p.x; p.py = p.y;
       p.h += headingDelta + normal(this.rand, 0, PARAMS.headingSigmaRad);
       const step = Math.max(0.2, normal(this.rand, PARAMS.stepLengthM, PARAMS.stepSigmaM));
       p.x += step * Math.cos(p.h); p.y += step * Math.sin(p.h);
       if (!isWalkable(this.map, p)) p.w *= PARAMS.outsidePenalty;
       if (crossesWall(this.map, old, p)) p.w *= PARAMS.wallPenalty;
     }
+    this.applySurveyedCellPrior();
     this.normalize(); if (this.neff() < this.particles.length * PARAMS.resampleNeffFraction) this.resample();
   }
-  observe(change) {
-    const v = PARAMS.magneticSigmaUT ** 2;
+  observe(sample, previous) {
+    if (this.mode === 'coverage') return;
+    const hasAbsolute = this.cells.some((cell) => Number.isFinite(cell.meanMagnitudeUT) && Number.isFinite(cell.meanVerticalUT));
     for (const p of this.particles) {
-      const expected = nearestCell(this.cells, p)?.magneticChangeUT || 0;
-      const r = change - expected;
-      p.w *= Math.exp(-0.5 * r * r / v);
+      const expected = nearestCell(this.cells, p);
+      if (!expected) continue;
+      if (this.mode === 'legacy' || !hasAbsolute) {
+        const v = PARAMS.magneticSigmaUT ** 2;
+        const r = sample.change - (expected.magneticChangeUT || 0);
+        p.w *= Math.exp(-0.5 * r * r / v);
+      } else {
+        if (this.mode === 'absolute' || this.mode === 'combo') {
+          const floor = this.mode === 'combo' ? 8.0 : PARAMS.absoluteMagneticSigmaUT;
+          const sigmaMag = Math.hypot(floor, expected.stddevMagnitudeUT || 0);
+          const sigmaVertical = Math.hypot(floor, expected.stddevVerticalUT || 0);
+          const rm = (sample.mag - expected.meanMagnitudeUT) / sigmaMag;
+          const rv = (sample.bv - expected.meanVerticalUT) / sigmaVertical;
+          p.w *= Math.exp(-0.5 * (rm * rm + rv * rv));
+        }
+        if ((this.mode === 'delta' || this.mode === 'combo') && previous) {
+          const prevCell = nearestCell(this.cells, { x: p.px, y: p.py });
+          if (!prevCell) continue;
+          const dm = sample.mag - previous.mag;
+          const dv = sample.bv - previous.bv;
+          const em = expected.meanMagnitudeUT - prevCell.meanMagnitudeUT;
+          const ev = expected.meanVerticalUT - prevCell.meanVerticalUT;
+          const v = PARAMS.deltaMagneticSigmaUT ** 2;
+          p.w *= Math.exp(-0.5 * (((dm - em) ** 2 + (dv - ev) ** 2) / v));
+        }
+      }
     }
     this.normalize(); if (this.neff() < this.particles.length * PARAMS.resampleNeffFraction) this.resample();
+  }
+  applySurveyedCellPrior() {
+    for (const p of this.particles) {
+      const d = nearestCellDistance(this.cells, p);
+      const excess = Math.max(0, d - PARAMS.surveyedCellNoPenaltyDistanceM);
+      if (excess <= 0) continue;
+      const z = excess / PARAMS.surveyedCellDistanceSigmaM;
+      p.w *= Math.max(PARAMS.surveyedCellPenaltyFloor, Math.exp(-0.5 * z * z));
+    }
   }
   normalize() {
     const s = this.particles.reduce((a, p) => a + p.w, 0);
@@ -159,12 +226,11 @@ function percentile(values, p) {
 }
 
 function main() {
-  const [mapFile, sessionFile] = process.argv.slice(2);
-  if (!mapFile || !sessionFile) usage();
+  const { mapFile, sessionFile, mode } = parseArgs(process.argv.slice(2));
   const pkg = readPackage(mapFile), samples = readSamples(sessionFile);
   if (samples.length < 2) throw new Error('Need at least 2 sample2d samples');
   if (!pkg.heatmapCells.length) throw new Error('Map package has no heatmapCells; run build-2d-heatmap first');
-  const filter = new Filter(pkg.map, pkg.heatmapCells, { x: samples[0].x, y: samples[0].y });
+  const filter = new Filter(pkg.map, pkg.heatmapCells, { x: samples[0].x, y: samples[0].y }, mode);
   const errors = [];
   let lastStep = samples[0], lastHeading = 0, lastFeature = samples[0];
   for (const s of samples.slice(1)) {
@@ -176,7 +242,7 @@ function main() {
     while (dh < -Math.PI) dh += 2 * Math.PI;
     filter.predict(dh);
     const change = Math.hypot(s.mag - lastFeature.mag, s.bv - lastFeature.bv);
-    filter.observe(change);
+    filter.observe({ ...s, change }, lastFeature);
     const e = filter.estimate();
     errors.push(Math.hypot(e.x - s.x, e.y - s.y));
     lastStep = s; lastHeading = heading; lastFeature = s;

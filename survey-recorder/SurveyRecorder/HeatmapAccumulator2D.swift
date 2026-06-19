@@ -25,7 +25,11 @@ struct HeatmapAccumulator2D {
                 cellSizeMeters: cellSizeMeters,
                 sampleCount: sorted.count,
                 passCount: estimatedPassCount(sorted),
-                magneticChangeUT: magneticChangeScore(samples: sorted)
+                magneticChangeUT: magneticChangeScore(samples: sorted),
+                meanMagnitudeUT: mean(sorted.map { $0.magnetic.magnitudeUT }),
+                stddevMagnitudeUT: stddev(sorted.map { $0.magnetic.magnitudeUT }),
+                meanVerticalUT: mean(sorted.map { $0.magnetic.verticalUT }),
+                stddevVerticalUT: stddev(sorted.map { $0.magnetic.verticalUT })
             )
         }
         .sorted { lhs, rhs in
@@ -66,6 +70,18 @@ struct HeatmapAccumulator2D {
         let sorted = values.sorted()
         let idx = min(sorted.count - 1, max(0, Int((Double(sorted.count - 1) * p).rounded())))
         return sorted[idx]
+    }
+
+    private func mean(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    private func stddev(_ values: [Double]) -> Double {
+        guard values.count >= 2 else { return 0 }
+        let m = mean(values)
+        let variance = values.reduce(0) { $0 + ($1 - m) * ($1 - m) } / Double(values.count - 1)
+        return sqrt(max(0, variance))
     }
 
     private struct CellKey: Hashable {

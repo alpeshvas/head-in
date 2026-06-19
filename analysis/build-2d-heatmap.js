@@ -114,6 +114,18 @@ function percentile(values, p) {
   return sorted[idx];
 }
 
+function mean(values) {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function stddev(values) {
+  if (values.length < 2) return 0;
+  const m = mean(values);
+  const variance = values.reduce((sum, value) => sum + (value - m) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(Math.max(0, variance));
+}
+
 function round(value, digits = 4) {
   if (!Number.isFinite(value)) return 0;
   const m = 10 ** digits;
@@ -142,6 +154,8 @@ function buildCells(map, samples, cellSize) {
       const dv = sorted[i].verticalUT - sorted[i - 1].verticalUT;
       deltas.push(Math.hypot(dm, dv));
     }
+    const magnitudes = sorted.map((s) => s.magnitudeUT);
+    const verticals = sorted.map((s) => s.verticalUT);
     cells.push({
       center: {
         x: round((bucket.ix + 0.5) * cellSize, 3),
@@ -151,6 +165,10 @@ function buildCells(map, samples, cellSize) {
       sampleCount: sorted.length,
       passCount: sources.size,
       magneticChangeUT: round(percentile(deltas, 0.75), 4),
+      meanMagnitudeUT: round(mean(magnitudes), 4),
+      stddevMagnitudeUT: round(stddev(magnitudes), 4),
+      meanVerticalUT: round(mean(verticals), 4),
+      stddevVerticalUT: round(stddev(verticals), 4),
     });
   }
   cells.sort((a, b) => a.center.y === b.center.y ? a.center.x - b.center.x : a.center.y - b.center.y);

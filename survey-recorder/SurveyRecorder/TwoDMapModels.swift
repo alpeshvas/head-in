@@ -61,6 +61,12 @@ struct MagneticHeatmapCell: Codable, Identifiable, Hashable {
     var passCount: Int
     /// Local magnetic texture in microtesla. Higher means a more useful fingerprint region.
     var magneticChangeUT: Double
+    /// Absolute magnetic fingerprint used by the 2D runtime. Optional so older
+    /// bundled/imported heatmap JSON still loads, but new surveys should fill it.
+    var meanMagnitudeUT: Double? = nil
+    var stddevMagnitudeUT: Double? = nil
+    var meanVerticalUT: Double? = nil
+    var stddevVerticalUT: Double? = nil
 }
 
 enum HeatmapMode2D: String, CaseIterable, Identifiable {

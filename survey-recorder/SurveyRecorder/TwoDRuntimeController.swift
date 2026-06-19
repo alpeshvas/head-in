@@ -7,6 +7,7 @@ import Observation
 final class TwoDRuntimeController {
     let map: VenueMap2D
     let heatmapCells: [MagneticHeatmapCell]
+    var observationMode: ParticleObservationMode2D
 
     private(set) var isRunning = false
     private(set) var statusText = "Ready"
@@ -14,10 +15,14 @@ final class TwoDRuntimeController {
     private(set) var magneticUpdates = 0
     private(set) var estimate: ParticleEstimate2D?
     private(set) var particleSnapshot: [MapPoint2D] = []
-    private(set) var lastMagneticChangeUT: Double?
-    private(set) var expectedMagneticChangeUT: Double?
+    private(set) var observedMagnitudeUT: Double?
+    private(set) var observedVerticalUT: Double?
+    private(set) var expectedMagnitudeUT: Double?
+    private(set) var expectedVerticalUT: Double?
     private(set) var magneticResidualUT: Double?
     private(set) var nearestHeatmapCellDistanceMeters: Double?
+    private(set) var meanParticleCellDistanceMeters: Double?
+    private(set) var farParticlePercent: Double?
 
     @ObservationIgnored private let sensorRecorder = SensorRecorder()
     @ObservationIgnored private var stepDetector = StepDetector2D()
@@ -26,9 +31,10 @@ final class TwoDRuntimeController {
     @ObservationIgnored private var pendingYawDelta = 0.0
     @ObservationIgnored private var lastStepFeature: MagneticFeature2D?
 
-    init(map: VenueMap2D, heatmapCells: [MagneticHeatmapCell]) {
+    init(map: VenueMap2D, heatmapCells: [MagneticHeatmapCell], observationMode: ParticleObservationMode2D = .absolute) {
         self.map = map
         self.heatmapCells = heatmapCells
+        self.observationMode = observationMode
     }
 
     func start(at entrance: Entrance2D) {
@@ -37,15 +43,23 @@ final class TwoDRuntimeController {
             statusText = "No magnetic heatmap cells"
             return
         }
+        guard heatmapCells.contains(where: { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil }) else {
+            statusText = "Heatmap needs magnetic means · resurvey or rebuild"
+            return
+        }
         filter = ParticleFilter2D(map: map, heatmapCells: heatmapCells, start: entrance.point)
         estimate = filter?.estimate
         detectedSteps = 0
         magneticUpdates = 0
         particleSnapshot = []
-        lastMagneticChangeUT = nil
-        expectedMagneticChangeUT = nil
+        observedMagnitudeUT = nil
+        observedVerticalUT = nil
+        expectedMagnitudeUT = nil
+        expectedVerticalUT = nil
         magneticResidualUT = nil
         nearestHeatmapCellDistanceMeters = nil
+        meanParticleCellDistanceMeters = nil
+        farParticlePercent = nil
         pendingYawDelta = 0
         previousMotionTimestamp = nil
         lastStepFeature = nil
@@ -97,13 +111,13 @@ final class TwoDRuntimeController {
         filter.predictStep(gyroDeltaRadians: pendingYawDelta)
         pendingYawDelta = 0
 
-        if let feature, let previous = lastStepFeature, motion.magneticField.accuracy != .uncalibrated {
-            let magneticChange = hypot(feature.magnitudeUT - previous.magnitudeUT, feature.verticalUT - previous.verticalUT)
-            filter.observe(magneticChangeUT: magneticChange)
-            magneticUpdates += 1
-            lastMagneticChangeUT = magneticChange
+        if let feature, motion.magneticField.accuracy != .uncalibrated {
+            filter.observe(magnetic: feature, previous: lastStepFeature, mode: observationMode)
+            if observationMode != .coverageOnly { magneticUpdates += 1 }
+            observedMagnitudeUT = feature.magnitudeUT
+            observedVerticalUT = feature.verticalUT
+            lastStepFeature = feature
         }
-        if let feature { lastStepFeature = feature }
         estimate = filter.estimate
         updateRuntimeDiagnostics(filter: filter)
         updateStatus()
@@ -111,19 +125,31 @@ final class TwoDRuntimeController {
 
     private func updateRuntimeDiagnostics(filter: ParticleFilter2D) {
         guard let estimate else { return }
-        expectedMagneticChangeUT = filter.expectedMagneticChangeUT(at: estimate.point)
+        let expected = filter.expectedMagneticFeature(at: estimate.point)
+        expectedMagnitudeUT = expected?.magnitudeUT
+        expectedVerticalUT = expected?.verticalUT
         nearestHeatmapCellDistanceMeters = filter.nearestHeatmapCellDistanceMeters(to: estimate.point)
-        if let lastMagneticChangeUT, let expectedMagneticChangeUT {
-            magneticResidualUT = lastMagneticChangeUT - expectedMagneticChangeUT
+        if let observedMagnitudeUT, let observedVerticalUT, let expectedMagnitudeUT, let expectedVerticalUT {
+            magneticResidualUT = hypot(observedMagnitudeUT - expectedMagnitudeUT, observedVerticalUT - expectedVerticalUT)
         } else {
             magneticResidualUT = nil
         }
 
         let stride = max(1, filter.particles.count / 250)
+        var distanceSum = 0.0
+        var distanceCount = 0
+        var farCount = 0
         particleSnapshot = filter.particles.enumerated().compactMap { index, particle in
+            if let distance = filter.nearestHeatmapCellDistanceMeters(to: MapPoint2D(x: particle.x, y: particle.y)) {
+                distanceSum += distance
+                distanceCount += 1
+                if distance > ParticleFilter2DParams.surveyedCellNoPenaltyDistanceMeters { farCount += 1 }
+            }
             guard index.isMultiple(of: stride) else { return nil }
             return MapPoint2D(x: particle.x, y: particle.y)
         }
+        meanParticleCellDistanceMeters = distanceCount > 0 ? distanceSum / Double(distanceCount) : nil
+        farParticlePercent = distanceCount > 0 ? 100 * Double(farCount) / Double(distanceCount) : nil
     }
 
     private func updateStatus() {

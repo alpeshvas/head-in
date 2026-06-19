@@ -5,6 +5,8 @@ struct Particle2D: Hashable {
     var y: Double
     var headingRadians: Double
     var weight: Double
+    var previousX: Double? = nil
+    var previousY: Double? = nil
 }
 
 struct ParticleEstimate2D: Hashable {
@@ -23,7 +25,33 @@ enum ParticleFilter2DParams {
     static let wallPenalty = 0.001
     static let outsidePenalty = 0.0001
     static let magneticSigmaUT = 3.0
+    static let absoluteMagneticSigmaUT = 5.0
+    static let deltaMagneticSigmaUT = 3.0
+    static let comboAbsoluteMagneticSigmaUT = 8.0
+    static let surveyedCellNoPenaltyDistanceMeters = 0.75
+    static let surveyedCellDistanceSigmaMeters = 0.75
+    static let surveyedCellPenaltyFloor = 0.02
     static let resampleNeffFraction = 0.5
+}
+
+enum ParticleObservationMode2D: String, CaseIterable, Identifiable {
+    case absolute
+    case delta
+    case combo
+    case coverageOnly
+    case legacyChange
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .absolute: return "Absolute"
+        case .delta: return "Delta"
+        case .combo: return "Combo"
+        case .coverageOnly: return "Coverage"
+        case .legacyChange: return "Legacy"
+        }
+    }
 }
 
 /// Minimal 2D particle filter core for the floor-plan runtime. It is intentionally
@@ -47,7 +75,9 @@ final class ParticleFilter2D {
                 x: start.x + r * cos(theta),
                 y: start.y + r * sin(theta),
                 headingRadians: 2 * Double.pi * rng.nextUnit(),
-                weight: 1.0 / Double(ParticleFilter2DParams.particleCount)
+                weight: 1.0 / Double(ParticleFilter2DParams.particleCount),
+                previousX: start.x,
+                previousY: start.y
             ))
         }
         normalize()
@@ -71,8 +101,9 @@ final class ParticleFilter2D {
             var weight = old.weight
             if !isWalkable(MapPoint2D(x: nx, y: ny)) { weight *= ParticleFilter2DParams.outsidePenalty }
             if crossesWall(from: MapPoint2D(x: old.x, y: old.y), to: MapPoint2D(x: nx, y: ny)) { weight *= ParticleFilter2DParams.wallPenalty }
-            particles[i] = Particle2D(x: nx, y: ny, headingRadians: heading, weight: weight)
+            particles[i] = Particle2D(x: nx, y: ny, headingRadians: heading, weight: weight, previousX: old.x, previousY: old.y)
         }
+        applySurveyedCellPrior()
         normalize()
         if effectiveParticleCount < Double(particles.count) * ParticleFilter2DParams.resampleNeffFraction { resample() }
     }
@@ -89,8 +120,80 @@ final class ParticleFilter2D {
         if effectiveParticleCount < Double(particles.count) * ParticleFilter2DParams.resampleNeffFraction { resample() }
     }
 
+    func observe(magnetic feature: MagneticFeature2D, previous: MagneticFeature2D?, mode: ParticleObservationMode2D) {
+        switch mode {
+        case .absolute:
+            observeAbsolute(magnetic: feature, sigma: ParticleFilter2DParams.absoluteMagneticSigmaUT)
+        case .delta:
+            if let previous { observeDelta(current: feature, previous: previous) }
+        case .combo:
+            observeAbsolute(magnetic: feature, sigma: ParticleFilter2DParams.comboAbsoluteMagneticSigmaUT, shouldNormalize: false)
+            if let previous { observeDelta(current: feature, previous: previous, shouldNormalize: false) }
+            normalize()
+            if effectiveParticleCount < Double(particles.count) * ParticleFilter2DParams.resampleNeffFraction { resample() }
+        case .coverageOnly:
+            return
+        case .legacyChange:
+            guard let previous else { return }
+            observe(magneticChangeUT: hypot(feature.magnitudeUT - previous.magnitudeUT, feature.verticalUT - previous.verticalUT))
+        }
+    }
+
+    private func observeAbsolute(magnetic feature: MagneticFeature2D, sigma floorSigma: Double, shouldNormalize: Bool = true) {
+        guard heatmapCells.contains(where: { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil }) else { return }
+        for i in particles.indices {
+            guard let cell = nearestCell(to: MapPoint2D(x: particles[i].x, y: particles[i].y)),
+                  let expectedMagnitude = cell.meanMagnitudeUT,
+                  let expectedVertical = cell.meanVerticalUT else {
+                particles[i].weight *= ParticleFilter2DParams.surveyedCellPenaltyFloor
+                continue
+            }
+            let sigmaMagnitude = magneticSigma(for: cell.stddevMagnitudeUT, floor: floorSigma)
+            let sigmaVertical = magneticSigma(for: cell.stddevVerticalUT, floor: floorSigma)
+            let magnitudeResidual = (feature.magnitudeUT - expectedMagnitude) / sigmaMagnitude
+            let verticalResidual = (feature.verticalUT - expectedVertical) / sigmaVertical
+            particles[i].weight *= exp(-0.5 * (magnitudeResidual * magnitudeResidual + verticalResidual * verticalResidual))
+        }
+        guard shouldNormalize else { return }
+        normalize()
+        if effectiveParticleCount < Double(particles.count) * ParticleFilter2DParams.resampleNeffFraction { resample() }
+    }
+
+    private func observeDelta(current: MagneticFeature2D, previous: MagneticFeature2D, shouldNormalize: Bool = true) {
+        guard heatmapCells.contains(where: { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil }) else { return }
+        let observedMagnitudeDelta = current.magnitudeUT - previous.magnitudeUT
+        let observedVerticalDelta = current.verticalUT - previous.verticalUT
+        let sigma2 = ParticleFilter2DParams.deltaMagneticSigmaUT * ParticleFilter2DParams.deltaMagneticSigmaUT
+        for i in particles.indices {
+            guard let previousX = particles[i].previousX,
+                  let previousY = particles[i].previousY,
+                  let previousCell = nearestCell(to: MapPoint2D(x: previousX, y: previousY)),
+                  let currentCell = nearestCell(to: MapPoint2D(x: particles[i].x, y: particles[i].y)),
+                  let previousMagnitude = previousCell.meanMagnitudeUT,
+                  let previousVertical = previousCell.meanVerticalUT,
+                  let currentMagnitude = currentCell.meanMagnitudeUT,
+                  let currentVertical = currentCell.meanVerticalUT else {
+                particles[i].weight *= ParticleFilter2DParams.surveyedCellPenaltyFloor
+                continue
+            }
+            let residualMagnitude = observedMagnitudeDelta - (currentMagnitude - previousMagnitude)
+            let residualVertical = observedVerticalDelta - (currentVertical - previousVertical)
+            particles[i].weight *= exp(-0.5 * (residualMagnitude * residualMagnitude + residualVertical * residualVertical) / sigma2)
+        }
+        guard shouldNormalize else { return }
+        normalize()
+        if effectiveParticleCount < Double(particles.count) * ParticleFilter2DParams.resampleNeffFraction { resample() }
+    }
+
     func expectedMagneticChangeUT(at point: MapPoint2D) -> Double? {
         nearestCell(to: point)?.magneticChangeUT
+    }
+
+    func expectedMagneticFeature(at point: MapPoint2D) -> MagneticFeature2D? {
+        guard let cell = nearestCell(to: point),
+              let magnitude = cell.meanMagnitudeUT,
+              let vertical = cell.meanVerticalUT else { return nil }
+        return MagneticFeature2D(magnitudeUT: magnitude, verticalUT: vertical, accuracyRawValue: 0)
     }
 
     func nearestHeatmapCellDistanceMeters(to point: MapPoint2D) -> Double? {
@@ -164,6 +267,24 @@ final class ParticleFilter2D {
     private func nearestCell(to point: MapPoint2D) -> MagneticHeatmapCell? {
         heatmapCells.min { a, b in
             distanceSquared(a.center, point) < distanceSquared(b.center, point)
+        }
+    }
+
+    private func magneticSigma(for cellStddev: Double?, floor: Double) -> Double {
+        let stddev = cellStddev ?? 0
+        return sqrt(floor * floor + stddev * stddev)
+    }
+
+    private func applySurveyedCellPrior() {
+        guard !heatmapCells.isEmpty else { return }
+        for i in particles.indices {
+            let point = MapPoint2D(x: particles[i].x, y: particles[i].y)
+            guard let distance = nearestHeatmapCellDistanceMeters(to: point) else { continue }
+            let excess = max(0, distance - ParticleFilter2DParams.surveyedCellNoPenaltyDistanceMeters)
+            guard excess > 0 else { continue }
+            let z = excess / ParticleFilter2DParams.surveyedCellDistanceSigmaMeters
+            let penalty = max(ParticleFilter2DParams.surveyedCellPenaltyFloor, exp(-0.5 * z * z))
+            particles[i].weight *= penalty
         }
     }
 

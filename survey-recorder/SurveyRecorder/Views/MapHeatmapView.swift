@@ -15,6 +15,7 @@ struct MapHeatmapView: View {
     @State private var activeImport: ImportKind?
     @State private var importError: String?
     @State private var saveNote: String?
+    @State private var observationMode = ParticleObservationMode2D.absolute
 
     private enum ImportKind { case mapJSON, image }
     @State private var surveyController: TwoDSurveyController?
@@ -27,6 +28,9 @@ struct MapHeatmapView: View {
         if let controller = surveyController, controller.isRunning { return controller.heatmapCells }
         if let liveCells = surveyController?.heatmapCells, !liveCells.isEmpty { return liveCells }
         return bundle.heatmapCells
+    }
+    private var cellsHaveRuntimeFingerprint: Bool {
+        cells.contains { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil }
     }
 
     var body: some View {
@@ -226,27 +230,46 @@ struct MapHeatmapView: View {
                         toggleRuntime()
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(map.entrances.isEmpty || cells.isEmpty)
+                    .disabled(map.entrances.isEmpty || cells.isEmpty || !cellsHaveRuntimeFingerprint)
                 }
+
+                Picker("Mode", selection: $observationMode) {
+                    ForEach(ParticleObservationMode2D.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(runtimeController?.isRunning == true)
 
                 if let controller = runtimeController {
                     HStack(spacing: 14) {
+                        stat("Mode", controller.observationMode.title)
                         stat("Steps", "\(controller.detectedSteps)")
                         stat("Mag obs", "\(controller.magneticUpdates)")
+                    }
+                    HStack(spacing: 14) {
                         stat("Radius", controller.estimate.map { String(format: "%.1fm", $0.confidenceRadiusMeters) } ?? "-")
-                    }
-                    HStack(spacing: 14) {
-                        stat("Observed", controller.lastMagneticChangeUT.map { String(format: "%.2fµT", $0) } ?? "-")
-                        stat("Expected", controller.expectedMagneticChangeUT.map { String(format: "%.2fµT", $0) } ?? "-")
-                        stat("Residual", controller.magneticResidualUT.map { String(format: "%+.2fµT", $0) } ?? "-")
-                    }
-                    HStack(spacing: 14) {
                         stat("Nearest cell", controller.nearestHeatmapCellDistanceMeters.map { String(format: "%.1fm", $0) } ?? "-")
+                    }
+                    HStack(spacing: 14) {
+                        stat("Obs Mag", controller.observedMagnitudeUT.map { String(format: "%.1fµT", $0) } ?? "-")
+                        stat("Exp Mag", controller.expectedMagnitudeUT.map { String(format: "%.1fµT", $0) } ?? "-")
+                        stat("Residual", controller.magneticResidualUT.map { String(format: "%.1fµT", $0) } ?? "-")
+                    }
+                    HStack(spacing: 14) {
+                        stat("Obs Vert", controller.observedVerticalUT.map { String(format: "%.1fµT", $0) } ?? "-")
+                        stat("Exp Vert", controller.expectedVerticalUT.map { String(format: "%.1fµT", $0) } ?? "-")
+                    }
+                    HStack(spacing: 14) {
                         stat("Neff", controller.estimate.map { String(format: "%.0f", $0.effectiveParticleCount) } ?? "-")
+                        stat("Mean cell dist", controller.meanParticleCellDistanceMeters.map { String(format: "%.1fm", $0) } ?? "-")
+                        stat("Far particles", controller.farParticlePercent.map { String(format: "%.0f%%", $0) } ?? "-")
+                    }
+                    HStack(spacing: 14) {
                         stat("Particles", "\(controller.particleSnapshot.count)")
                     }
-                } else if map.entrances.isEmpty || cells.isEmpty {
-                    Text(map.entrances.isEmpty ? "Add an entrance before runtime tracking." : "Generate/import heatmap cells before runtime tracking.")
+                } else if map.entrances.isEmpty || cells.isEmpty || !cellsHaveRuntimeFingerprint {
+                    Text(runtimeUnavailableText)
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -309,11 +332,17 @@ struct MapHeatmapView: View {
             runtimeController?.stop()
             return
         }
-        guard let entrance = map.entrances.first else { return }
+        guard let entrance = map.entrances.first, cellsHaveRuntimeFingerprint else { return }
         surveyController?.stop()
-        let controller = TwoDRuntimeController(map: map, heatmapCells: cells)
+        let controller = TwoDRuntimeController(map: map, heatmapCells: cells, observationMode: observationMode)
         runtimeController = controller
         controller.start(at: entrance)
+    }
+
+    private var runtimeUnavailableText: String {
+        if map.entrances.isEmpty { return "Add an entrance before runtime tracking." }
+        if cells.isEmpty { return "Generate/import heatmap cells before runtime tracking." }
+        return "Heatmap cells need magnetic means. Resurvey in-app or rebuild/import with build-2d-heatmap."
     }
 
     private func alignmentButtonTitle(_ controller: TwoDSurveyController) -> String {
