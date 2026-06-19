@@ -268,9 +268,14 @@ function segmentOfBin(gp, bin) {
  * the forward profile, unlike the direction-symmetric raw magnitude.
  * Returns per-point stats or null when the window does not fit.
  */
-function perPointLogLik(gp, live, endBin, sigmaOverride) {
+function perPointLogLik(gp, live, endBin, sigmaOverride, reverse = false) {
   const L = live.length;
-  if (endBin - L + 1 < 0 || endBin >= gp.bins) return null;
+  // Forward: window occupies bins [endBin-L+1 .. endBin] (newest at endBin, came
+  // from lower bins). Reverse (returning leg): newest sample at endBin, window
+  // extends to HIGHER bins (came from higher bins, retracing down), and the
+  // profile difference is read the other way — bidirectional-route-tracking.md §2.
+  if (reverse) { if (endBin + L - 1 >= gp.bins || endBin < 0) return null; }
+  else if (endBin - L + 1 < 0 || endBin >= gp.bins) return null;
 
   // Differences are taken at ONE STRIDE of lag (FollowMe differences at step
   // scale): adjacent-bin deltas (~5 cm) are noise-dominated, stride-scale
@@ -288,9 +293,23 @@ function perPointLogLik(gp, live, endBin, sigmaOverride) {
   const v = sigma * sigma;
   let ll = 0;
   const residuals = [];
+  // The live window is ALWAYS newest-sample-last (the provider's order). Forward:
+  // live[k] sits at bin (endBin-L+1+k), ascending — newest (k=L-1) at endBin.
+  // Reverse (returning): the newest sample is still the current position endBin,
+  // and older samples were at HIGHER bins (you came from up-route), so live[k]
+  // sits at bin (endBin + (L-1-k)), and the profile is read downward.
   for (let k = 0; k + lag < L; k++) {
-    const idx = endBin - L + 1 + k;
-    const resid = (live[k + lag] - live[k]) - (gp.mean[idx + lag] - gp.mean[idx]);
+    const liveDiff = live[k + lag] - live[k];
+    let profDiff;
+    if (reverse) {
+      const binK = endBin + (L - 1 - k);          // bin of live[k]
+      const binKlag = endBin + (L - 1 - (k + lag)); // bin of live[k+lag] (lower)
+      profDiff = gp.mean[binKlag] - gp.mean[binK];
+    } else {
+      const idx = endBin - L + 1 + k;
+      profDiff = gp.mean[idx + lag] - gp.mean[idx];
+    }
+    const resid = liveDiff - profDiff;
     ll += -0.5 * (resid * resid / v + Math.log(2 * Math.PI * v));
     residuals.push(resid);
   }
@@ -345,20 +364,28 @@ class RouteGridFilter {
     const next = new Float64Array(gp.bins).fill(0);
     let leaked = 0;
 
+    // Direction-aware drift (bidirectional-route-tracking.md §1, §9): forward
+    // advances +stride; while the `returning` latch is set the walker is
+    // retracing the path, so the kernel mean is −stride and the asymmetric tail
+    // flips (3 strides backward, small forward tail). The 1-D belief is
+    // direction-agnostic; only this drift sign needs to follow the latch.
+    const dir = this.returning ? -1 : 1;
     for (let i = 0; i < gp.bins; i++) {
       const p = this.belief[i];
       if (p <= 0) continue;
       const m = segmentOfBin(gp, i).binsPerStep;
+      const drift = dir * m;
       const sigma = Math.max(0.8, PARAMS.stepNoiseFrac * m);
-      const lo = Math.floor(i - m);          // allow a backward step
-      const hi = Math.ceil(i + 3 * m);       // up to 3 strides forward
+      // support: one stride against the drift, up to 3 strides with it.
+      const lo = Math.floor(dir > 0 ? i - m : i - 3 * m);
+      const hi = Math.ceil(dir > 0 ? i + 3 * m : i + m);
       let kernelSum = 0;
       for (let j = lo; j <= hi; j++) {
-        kernelSum += Math.exp(-0.5 * ((j - i - m) / sigma) ** 2) + PARAMS.kernelFloor;
+        kernelSum += Math.exp(-0.5 * ((j - i - drift) / sigma) ** 2) + PARAMS.kernelFloor;
       }
       const stay = p * (1 - PARAMS.offLeakPerStep);
       for (let j = lo; j <= hi; j++) {
-        const k = Math.exp(-0.5 * ((j - i - m) / sigma) ** 2) + PARAMS.kernelFloor;
+        const k = Math.exp(-0.5 * ((j - i - drift) / sigma) ** 2) + PARAMS.kernelFloor;
         const share = stay * (k / kernelSum);
         if (j < 0) {
           next[0] += share;                  // route start is a barrier
@@ -460,15 +487,19 @@ class RouteGridFilter {
     const windowCache = new Map();
     let anyWindow = false;
 
+    // While returning, read the profile in reverse (window extends to higher
+    // bins from s); forward reads it as before (window extends to lower bins).
+    const reverse = this.returning;
     for (let s = 0; s < gp.bins; s++) {
       const seg = segmentOfBin(gp, s);
       if (!windowCache.has(seg.index)) windowCache.set(seg.index, liveWindowForSegment(seg));
       const live = windowCache.get(seg.index);
       if (!live) continue;
       const L = live.length;
-      if (s - L + 1 < 0) continue; // window must fit inside the route start
+      // window must fit inside the route (start for forward, end for reverse)
+      if (reverse ? (s + L - 1 >= gp.bins) : (s - L + 1 < 0)) continue;
 
-      const stats = perPointLogLik(gp, live, s);
+      const stats = perPointLogLik(gp, live, s, undefined, reverse);
       if (!stats) continue;
       logLik[s] = stats.perPoint * PARAMS.obsIndependenceBins; // temper autocorrelation
       anyWindow = true;

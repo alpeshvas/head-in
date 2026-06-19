@@ -208,21 +208,26 @@ final class RouteBeliefFilter {
         var next = [Double](repeating: 0, count: gp.bins)
         var leaked = 0.0
 
+        // Direction-aware drift (bidirectional-route-tracking.md §1, §9): +stride
+        // forward, −stride while the `returning` latch retraces the path. Mirror
+        // of grid-filter.js predictStep.
+        let dir = returning ? -1.0 : 1.0
         for i in 0..<gp.bins {
             let p = belief[i]
             if p <= 0 { continue }
             let m = gp.segment(ofBin: i).binsPerStep
+            let drift = dir * m
             let sigma = max(0.8, FilterParams.stepNoiseFrac * m)
-            let lo = Int((Double(i) - m).rounded(.down))
-            let hi = Int((Double(i) + 3 * m).rounded(.up))
+            let lo = Int((Double(i) + (dir > 0 ? -m : -3 * m)).rounded(.down))
+            let hi = Int((Double(i) + (dir > 0 ? 3 * m : m)).rounded(.up))
             var kernelSum = 0.0
             for j in lo...hi {
-                let d = (Double(j - i) - m) / sigma
+                let d = (Double(j - i) - drift) / sigma
                 kernelSum += exp(-0.5 * d * d) + FilterParams.kernelFloor
             }
             let stay = p * (1 - FilterParams.offLeakPerStep)
             for j in lo...hi {
-                let d = (Double(j - i) - m) / sigma
+                let d = (Double(j - i) - drift) / sigma
                 let k = exp(-0.5 * d * d) + FilterParams.kernelFloor
                 let share = stay * (k / kernelSum)
                 if j < 0 {
@@ -415,21 +420,33 @@ final class RouteBeliefFilter {
         // Single fitted homoscedastic difference noise (Magicol: one sigma per
         // building) — the per-bin survey std is NOT used: adjacent-bin map
         // errors are common-mode and cancel in differences.
+        // While returning, read the profile in reverse (window extends to higher
+        // bins from s, profile difference read downward); mirror of grid-filter.js
+        // perPointLogLik(..., reverse). Window is newest-sample-last either way.
+        let reverse = returning
         let v = gp.diffSigmaUT * gp.diffSigmaUT
         for s in 0..<gp.bins {
             let seg = gp.segment(ofBin: s)
             if windowCache[seg.index] == nil { windowCache[seg.index] = windowForSegment(seg) }
             guard let live = windowCache[seg.index] ?? nil else { continue }
             let L = live.count
-            guard s - L + 1 >= 0 else { continue }
+            guard reverse ? (s + L - 1 < gp.bins) : (s - L + 1 >= 0) else { continue }
             let lag = max(2, Int(seg.binsPerStep.rounded()))
             guard L > lag else { continue }
 
             var ll = 0.0
             var k = 0
             while k + lag < L {
-                let idx = s - L + 1 + k
-                let resid = (live[k + lag] - live[k]) - (gp.mean[idx + lag] - gp.mean[idx])
+                let profDiff: Double
+                if reverse {
+                    let binK = s + (L - 1 - k)
+                    let binKlag = s + (L - 1 - (k + lag))
+                    profDiff = gp.mean[binKlag] - gp.mean[binK]
+                } else {
+                    let idx = s - L + 1 + k
+                    profDiff = gp.mean[idx + lag] - gp.mean[idx]
+                }
+                let resid = (live[k + lag] - live[k]) - profDiff
                 ll += -0.5 * (resid * resid / v + log(2 * Double.pi * v))
                 k += 1
             }

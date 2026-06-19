@@ -594,3 +594,43 @@ the terminus guard correctly refuses to flip. The latch is therefore *built and
 parity-safe but not yet demonstrated engaging end-to-end*; that demonstration
 needs a **strong-field round-trip** (Plumeria) where forward tracking reaches
 the terminus. The mechanism is correct (unit-checked); the venue is the blocker.
+
+## 10. EXPERIMENTAL: −stride reverse position tracking (2026-06-19, §1+§2)
+
+Added the actual reverse-*tracking* (not just suppression) to the shipped filter,
+gated behind `returning` so it is **provably inert forward** (zero matrix
+regressions; 6/6 parity green incl. the round-trip fixture):
+- **Direction-aware `predictStep`**: kernel mean ±stride by the latch; asymmetric
+  tail flips (3 strides with the drift, 1 against). Barriers already correct
+  (backward overflow piles at bin 0 = back at entrance).
+- **Direction-aware emission** (`perPointLogLik(..., reverse)`): on the return
+  leg the window (newest-sample-last, always) maps the newest sample to the
+  current bin and older samples to HIGHER bins, and the profile first-difference
+  is read downward. **A newest-first indexing bug in the first cut scored 0/7;
+  fixed to newest-last → the emission math localizes a synthesized return window
+  24/24 (worst |diff| 0 bins) on Plumeria Test.** (Note: `bidir-replay.js`'s
+  `perPointLogLikReverse` still has the old newest-first bug — research harness,
+  superseded by the shipped path.)
+
+**Integration result — works on clean geometry, FRAGILE on ambiguous routes
+(NOT yet shippable enabled):** driving the real filter in `returning` mode through
+a synthesized clean return leg on **L478**: the unambiguous middle tracks
+near-perfectly (errors 1–9 bins over a long stretch), but it **collapses on the
+twice-traversed hallway** — the belief slides to a mirrored lower-bin position and
+runs to the start barrier (P50 108 bins / P75 278 bins overall), pOff staying 0
+throughout. Root cause = the **same mirrored-corridor ambiguity the forward filter
+has on L478** (STATUS L50), but worse going backward: there is no route-U-turn
+anchor to recapture on the return, so once the `−stride` march locks onto the
+mirror it cannot recover. On unambiguous routes this would not occur, but the
+filter cannot tell ahead of time.
+
+**Verdict:** the `−stride` idea is correct and the emission math is proven; reverse
+*tracking* is real but **inherits (and amplifies) the forward filter's
+mirrored-geometry weakness**, so it must NOT be enabled live on arbitrary routes
+yet. It stays in the code, forward-inert, as the foundation. To make it shippable
+needs either (a) a recapture anchor on the return (the reversed turn sequence), or
+(b) restricting it to routes without mirrored/ambiguous segments, plus the
+still-pending strong-field live round-trip to validate against real sensor data
+(this test used synthesized clean windows, which isolate the math but omit live
+noise). The deployed live build uses the **detect+suppress** behavior (§9), which
+is safe; the −stride tracking is not wired into the Live decision path.
