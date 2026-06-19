@@ -75,7 +75,6 @@ private struct LivePositioningContent: View {
                 primaryCard
                 controlsCard
                 if let pathData { card { RouteMapView(controller: controller, pathData: pathData) } }
-                routeTimelineCard
                 routeOnlyCard
                 diagnosticsCard
             }
@@ -180,45 +179,6 @@ private struct LivePositioningContent: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .background(statusColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var routeTimelineCard: some View {
-        card {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Route timeline")
-                    .font(.headline)
-
-                VStack(spacing: 12) {
-                    ForEach(controller.profile.anchors) { anchor in
-                        timelineRow(anchor)
-                    }
-                }
-            }
-        }
-    }
-
-    private func timelineRow(_ anchor: RouteAnchor) -> some View {
-        let state = checkpointState(for: anchor)
-        return HStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(state.color.opacity(state == .upcoming ? 0.12 : 0.18))
-                    .frame(width: 30, height: 30)
-                Image(systemName: state.iconName)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(state.color)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(anchor.name)
-                    .font(.subheadline.weight(state == .current ? .bold : .semibold))
-                    .foregroundStyle(state == .upcoming ? .secondary : .primary)
-                Text(state.label)
-                    .font(.caption)
-                    .foregroundStyle(state.color)
-            }
-            Spacer()
-        }
     }
 
     private var controlsCard: some View {
@@ -374,49 +334,8 @@ private struct LivePositioningContent: View {
         }
     }
 
-    private func checkpointState(for anchor: RouteAnchor) -> CheckpointState {
-        if controller.isComplete { return .complete }
-
-        let activePosition = controller.activeSegmentPosition
-        if !controller.isRunning && controller.totalSampleCount == 0 {
-            return anchor.index == 0 ? .current : .upcoming
-        }
-        if anchor.index <= activePosition { return .complete }
-        if anchor.index == activePosition + 1 { return .current }
-        return .upcoming
-    }
-
     private func percent(_ value: Double) -> String {
         "\(Int((value * 100).rounded()))%"
     }
 }
 
-private enum CheckpointState {
-    case complete
-    case current
-    case upcoming
-
-    var color: Color {
-        switch self {
-        case .complete: return .green
-        case .current: return .blue
-        case .upcoming: return .secondary
-        }
-    }
-
-    var iconName: String {
-        switch self {
-        case .complete: return "checkmark"
-        case .current: return "location.fill"
-        case .upcoming: return "circle.fill"
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .complete: return "Reached"
-        case .current: return "Current target"
-        case .upcoming: return "Upcoming"
-        }
-    }
-}
