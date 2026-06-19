@@ -7,6 +7,10 @@ import UIKit
 import AppKit
 #endif
 
+/// Absolute sample-count target for the survey-strength colour ramp.
+/// A cell reaches the full sample-score contribution at this many samples.
+private let surveyStrengthSampleTarget = 50
+
 struct MapHeatmapView: View {
     @State private var mode = HeatmapMode2D.surveyStrength
     @State private var bundle = VenueMap2DStore.loadSavedOrBundled()
@@ -15,6 +19,7 @@ struct MapHeatmapView: View {
     @State private var activeImport: ImportKind?
     @State private var importError: String?
     @State private var saveNote: String?
+    @State private var confirmClear = false
     @State private var observationMode = ParticleObservationMode2D.absolute
 
     private enum ImportKind { case mapJSON, image }
@@ -159,7 +164,7 @@ struct MapHeatmapView: View {
         case .surveyStrength:
             let counts = cells.map(\.sampleCount)
             guard let lo = counts.min(), let hi = counts.max(), hi > 0 else { return nil }
-            return "\(lo)–\(hi) samples/cell"
+            return "\(lo)–\(hi) samples/cell (target \(surveyStrengthSampleTarget))"
         case .magneticMeanMagnitude:
             let values = cells.compactMap(\.meanMagnitudeUT)
             guard let lo = values.min(), let hi = values.max(), !values.isEmpty else { return nil }
@@ -206,10 +211,18 @@ struct MapHeatmapView: View {
                         .buttonStyle(.borderedProminent)
 
                         Button("Clear") {
-                            clearSurveyedHeatmap()
+                            confirmClear = true
                         }
                         .buttonStyle(.bordered)
                         .disabled(surveyController?.isRunning == true || cells.isEmpty)
+                        .confirmationDialog("Clear surveyed heatmap?", isPresented: $confirmClear, titleVisibility: .visible) {
+                            Button("Clear", role: .destructive) {
+                                clearSurveyedHeatmap()
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("This removes all surveyed cells from the saved map. This cannot be undone.")
+                        }
                     }
                 }
 
@@ -565,7 +578,6 @@ struct FloorPlanHeatmapCanvas: View {
             drawEmptyWalkableGrid(in: &context, transform: transform)
         }
 
-        let maxSamples = max(cells.map(\.sampleCount).max() ?? 1, 1)
         let magnitudeRange = valueRange(cells.compactMap(\.meanMagnitudeUT))
 
         for cell in cells {
@@ -574,7 +586,7 @@ struct FloorPlanHeatmapCanvas: View {
             let color: Color
             switch mode {
             case .surveyStrength:
-                let sampleScore = min(1, Double(cell.sampleCount) / Double(maxSamples))
+                let sampleScore = min(1, Double(cell.sampleCount) / Double(surveyStrengthSampleTarget))
                 let passScore = min(1, Double(cell.passCount) / 4.0)
                 let score = 0.65 * sampleScore + 0.35 * passScore
                 color = surveyStrengthColor(score)
@@ -735,7 +747,8 @@ struct FloorPlanHeatmapCanvas: View {
         }
     }
 
-    // Coverage ramp: red = sparse data, green = enough. High, opaque alpha so cells
+    // Coverage ramp: red = sparse data, green = enough. Sample score saturates at
+    // 50 samples/cell; pass score saturates at 4 passes. High, opaque alpha so cells
     // read clearly over the dark background and the dimmed floor-plan image.
     private func surveyStrengthColor(_ score: Double) -> Color {
         if score < 0.25 { return Color(red: 0.90, green: 0.20, blue: 0.20).opacity(0.78) }
