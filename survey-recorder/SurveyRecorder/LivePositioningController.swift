@@ -384,6 +384,10 @@ final class LivePositioningController {
 
     private func refreshOutputs(at timestamp: TimeInterval) {
         let meanBin = filter.meanBin
+        // In-place pacing: the live field is confined to one patch, so the walker
+        // is not covering ground. Blocks fires AND freezes the displayed position
+        // (the belief still marches on step count, but we must not show progress).
+        let confined = confinementRatio(at: timestamp) < FilterParams.confinementFireMin
         pOff = filter.pOff
         posteriorStdBins = filter.beliefStdDev
 
@@ -407,7 +411,7 @@ final class LivePositioningController {
             let onRoute = max(1 - pOff, 1e-9)
             let fired = stepsSinceObservation <= FilterParams.observationRecencySteps
                 && !filter.reversalActive
-                && confinementRatio(at: timestamp) >= FilterParams.confinementFireMin
+                && !confined
                 && filter.probBeyond(bin: cp.decisionBin) / onRoute > FilterParams.checkpointTau
                 && pOff < FilterParams.offRouteTau
             checkpointConsecutive = fired ? checkpointConsecutive + 1 : 0
@@ -432,7 +436,14 @@ final class LivePositioningController {
         let floorBin = reachedCheckpoints > 0
             ? Double(min(gp.checkpoints[reachedCheckpoints - 1].bin + 1, gp.bins - 1))
             : 0
-        displayBin = max(meanBin, floorBin)
+        // While confined (pacing) the belief marches on raw step count, but the
+        // walker isn't progressing — hold the displayed bin so the segment card
+        // and rings don't creep forward. Floor (last fired checkpoint) still wins.
+        if confined {
+            displayBin = max(floorBin, displayBin)
+        } else {
+            displayBin = max(meanBin, floorBin)
+        }
         let seg = gp.segment(ofBin: Int(displayBin))
         globalProgress = displayBin / Double(max(gp.bins - 1, 1))
         segmentProgress = min(1, max(0, (displayBin - Double(seg.startBin)) / Double(max(seg.count - 1, 1))))
@@ -441,6 +452,8 @@ final class LivePositioningController {
             statusText = "Off route?"
         } else if motionMode != .walking {
             statusText = pausedMotionStatusText
+        } else if confined {
+            statusText = "Holding position"
         } else if reachedCheckpoints < gp.checkpoints.count,
                   filter.probBeyond(bin: gp.checkpoints[reachedCheckpoints].decisionBin) > 0.4 {
             statusText = "Near \(gp.checkpoints[reachedCheckpoints].name)"
