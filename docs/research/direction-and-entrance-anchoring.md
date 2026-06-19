@@ -83,7 +83,27 @@ signal**, not a magnetic problem. Options, cheapest first:
 4. **RoNIN-class odometry** — only if pocket-carry drift later demands it
    (Phase 4; training-data + license cost).
 
-Next experiment when revisited: compute a gait travel-heading on the LIS forward
-survey vs the reverse walk and confirm the ~180° separation that the
-phone-attitude compass test failed to show — this time using
-acceleration-variance direction (travel) rather than device attitude (hold).
+## Experiment run (2026-06-19): gait travel-heading on the LIS traces
+
+`analysis/gait-heading-direction.js` — per ~1.2 s window, PCA principal axis of
+gravity-aligned horizontal **user acceleration** (travel axis), sign resolved by
+integrated-velocity projection, expressed relative to the world-frame magnetic
+field bearing (cancels the per-session arbitrary frame). Result:
+
+| Walk | circMean(travelHeading − fieldBearing) |
+|---|---|
+| FWD survey p1 | ~122° |
+| FWD survey p2 | (same cluster) |
+| REVERSE walk | ~−15° |
+| **Separation** | **136°** (vs **1°** for the device-compass attitude test) |
+
+**Conclusion: travel direction IS recoverable from gait/acceleration** — a clear
+136° forward/reverse split where the device compass gave 1°. The hypothesis holds.
+Caveats: the gap from the ideal 180° and the wide spread (~90°) come from the
+**crude sign resolution** (1.2 s-window velocity integration, no ZUPT). A temporal
+sign-continuity tweak made it *worse* (65°; the two forward passes diverged to
+−77°/−136°) — confirming the sign must be resolved **per step from gait-cycle
+asymmetry** (the literature method), not propagated. Production path: per-step
+PCA-GA with gait-cycle sign resolution (lit. P50 heading error 5.6°) → clean
+~180° gate → reject reverse/wrong-way before firing. This validates option (a) in
+the decision list above as the right direction.
