@@ -966,3 +966,37 @@ Validate the measurement chain (profile, harness path, ground-truth scale) befor
 concluding the algorithm is the problem. The remaining genuine unknowns are small:
 the Live lifecycle wiring (device) and whether 6/7 → 7/7 needs a landmark in seg5
 or just the uncheck reframe (a strong-route round-trip would confirm).
+
+## 16. SHIPPED: mid-route turnaround (turn around before the route end) (2026-06-20)
+
+§13–§15 handled the FULL out-and-back (walk to the end, U-turn, back). A device test
+exposed the next case: walking out **partway** (Start→Paundha) and U-turning showed
+nothing on the map. Confirmed on the real trace (`…025626`): the +185° U-turn at
+Paundha was detected and forward tracking reached it, but the latch's **terminus
+guard** refused the flip (mean ~520, not the route end).
+
+**Fix:** `observeTurn` now also flips forward→backward on a mid-route unmatched
+~180° turn, gated on what actually separates a real reversal from the failure modes:
+- **pOff (captured BEFORE this turn's OFF injection) < offRouteTau** — the walker is
+  confidently ON-ROUTE. Per the key insight that *an on-route walker must not be
+  pace-gated*, this REPLACES the confinement gate (which wrongly blocked a confident
+  walker whose field-range dipped during the pivot — the §16 diagnosis).
+- **mean past the first segment** — actually walked into the route.
+- **the ROUTE has no ~180° turn in its signature** — only then is a mid-route U-turn
+  unambiguously a reversal. Routes with their own U-turn (Ravi 170°, L478 181°/215°)
+  stay terminus-only: a position-based "is this the route's own turn" guard is
+  unreliable because on weak routes the tracked mean isn't at the turn bin when it
+  fires (this reintroduced the §9 Ravi-normal regression, 3/4→1/4, in testing). The
+  robust cross-route fix remains the **magnetic-shape reverse cross-check (§3.5)**,
+  not yet built.
+
+**Validated (offline + parity):** USER `025626`/`024258` flip and retrace (meanBin
+520→7, pOff 0); Ravi-normal 3/4 with NO false flip + pacing 0/4; L478 and LIS forward
+unchanged (Test 3/3 P50 0.35, L478 6/6 0.34, LIS 7/7 0.59); `npm test` parity green
+(JS + Swift). Also fixed a latent bug merged to main (a dangling `midRouteReturnOK`
+reference that would throw on any mid-route ≥140° turn). Deployed to device on branch
+`mid-route-turnaround`.
+
+**Boundary:** mid-route turnaround works on routes with **no internal ~180° turn**
+(LIS, Plumeria-style corridors). On routes that double back on themselves it stays
+terminus-only until the magnetic cross-check exists.
