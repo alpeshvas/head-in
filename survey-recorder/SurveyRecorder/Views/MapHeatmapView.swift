@@ -145,7 +145,33 @@ struct MapHeatmapView: View {
                 Text(mode.caption)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                if let range = modeRangeText {
+                    Text(range)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
             }
+        }
+    }
+
+    private var modeRangeText: String? {
+        switch mode {
+        case .surveyStrength:
+            let counts = cells.map(\.sampleCount)
+            guard let lo = counts.min(), let hi = counts.max(), hi > 0 else { return nil }
+            return "\(lo)–\(hi) samples/cell"
+        case .magneticFieldChange:
+            let changes = cells.map(\.magneticChangeUT)
+            guard let lo = changes.min(), let hi = changes.max(), hi > 0 else { return nil }
+            return String(format: "%.2f–%.2f µT texture", lo, hi)
+        case .magneticMeanMagnitude:
+            let values = cells.compactMap(\.meanMagnitudeUT)
+            guard let lo = values.min(), let hi = values.max(), !values.isEmpty else { return nil }
+            return String(format: "%.1f–%.1f µT mean magnitude", lo, hi)
+        case .magneticMeanVertical:
+            let values = cells.compactMap(\.meanVerticalUT)
+            guard let lo = values.min(), let hi = values.max(), !values.isEmpty else { return nil }
+            return String(format: "%.1f–%.1f µT mean vertical", lo, hi)
         }
     }
 
@@ -156,6 +182,7 @@ struct MapHeatmapView: View {
                     .font(.headline)
                 Label("Survey strength combines sample count and repeated passes per cell.", systemImage: "checkmark.circle")
                 Label("Magnetic change visualizes local field texture, not absolute field strength.", systemImage: "waveform.path.ecg")
+                Label("Mag/Vert average show the mean magnetic magnitude and vertical component the runtime matches against.", systemImage: "chart.bar.xaxis")
                 Label("Rooms are first-class geometry so the runtime can report room confidence, not only x/y.", systemImage: "square.split.2x2")
                 Label("Walls, entrances, and AR alignment points now come from venue-map JSON.", systemImage: "point.3.connected.trianglepath.dotted")
             }
@@ -390,6 +417,7 @@ struct FloorPlanHeatmapCanvas: View {
     @GestureState private var pinch: CGFloat = 1
     @State private var committedPan: CGSize = .zero
     @GestureState private var dragPan: CGSize = .zero
+    @State private var floorPlanImage: Image?
 
     private static let minZoom: CGFloat = 1
     private static let maxZoom: CGFloat = 10
@@ -405,7 +433,7 @@ struct FloorPlanHeatmapCanvas: View {
         GeometryReader { proxy in
             let transform = MapTransform(map: map, size: proxy.size, zoom: liveZoom, pan: liveOffset)
             ZStack(alignment: .topLeading) {
-                if let image = floorPlanImage() {
+                if let image = floorPlanImage {
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -414,7 +442,7 @@ struct FloorPlanHeatmapCanvas: View {
                         .opacity(0.72)
                 }
                 Canvas { context, size in
-                    drawBackground(in: &context, size: size, hasImage: floorPlanImage() != nil)
+                    drawBackground(in: &context, size: size, hasImage: floorPlanImage != nil)
                     drawWalkableAreas(in: &context, transform: transform)
                     drawHeatmap(in: &context, transform: transform)
                     drawRooms(in: &context, transform: transform, zoom: liveZoom)
@@ -429,6 +457,9 @@ struct FloorPlanHeatmapCanvas: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
             .clipped()
             .contentShape(Rectangle())
+            .task(id: map.image?.fileName) {
+                floorPlanImage = loadFloorPlanImage()
+            }
             .gesture(
                 MagnificationGesture()
                     .updating($pinch) { value, state, _ in state = value }
@@ -490,7 +521,7 @@ struct FloorPlanHeatmapCanvas: View {
         context.fill(Path(rect), with: .color(hasImage ? .clear : Color.mapSecondaryGroupedBackground))
     }
 
-    private func floorPlanImage() -> Image? {
+    private func loadFloorPlanImage() -> Image? {
         guard let fileName = map.image?.fileName else { return nil }
         let docsURL = VenueMap2DStore.venueMapsDirectory.appendingPathComponent(fileName)
         #if canImport(UIKit)
@@ -508,10 +539,14 @@ struct FloorPlanHeatmapCanvas: View {
     }
 
     private func drawHeatmap(in context: inout GraphicsContext, transform: MapTransform) {
-        drawEmptyWalkableGrid(in: &context, transform: transform)
+        if cells.isEmpty {
+            drawEmptyWalkableGrid(in: &context, transform: transform)
+        }
 
         let maxSamples = max(cells.map(\.sampleCount).max() ?? 1, 1)
-        let maxChange = max(cells.map(\.magneticChangeUT).max() ?? 1, 1)
+        let maxChange = max(cells.map(\.magneticChangeUT).max() ?? 0, 0)
+        let magnitudeRange = valueRange(cells.compactMap(\.meanMagnitudeUT))
+        let verticalRange = valueRange(cells.compactMap(\.meanVerticalUT))
 
         for cell in cells {
             guard Geometry2D.isWalkable(cell.center, in: map) else { continue }
@@ -524,12 +559,32 @@ struct FloorPlanHeatmapCanvas: View {
                 let score = 0.65 * sampleScore + 0.35 * passScore
                 color = surveyStrengthColor(score)
             case .magneticFieldChange:
-                color = magneticChangeColor(min(1, cell.magneticChangeUT / maxChange))
+                let score = maxChange > 0 ? min(1, cell.magneticChangeUT / maxChange) : 0
+                color = magneticChangeColor(score)
+            case .magneticMeanMagnitude:
+                color = averageColor(cell.meanMagnitudeUT, in: magnitudeRange)
+            case .magneticMeanVertical:
+                color = averageColor(cell.meanVerticalUT, in: verticalRange)
             }
             let cellPath = Path(roundedRect: rect, cornerRadius: 2)
             context.fill(cellPath, with: .color(color))
             context.stroke(cellPath, with: .color(.black.opacity(0.25)), lineWidth: 0.5)
         }
+    }
+
+    private func valueRange(_ values: [Double]) -> (min: Double, max: Double) {
+        guard let lo = values.min(), let hi = values.max() else { return (0, 0) }
+        return (lo, hi)
+    }
+
+    private func averageColor(_ value: Double?, in range: (min: Double, max: Double)) -> Color {
+        guard let value else {
+            return Color.gray.opacity(0.18)
+        }
+        let span = range.max - range.min
+        guard span > 1e-6 else { return magneticAverageColor(0.5) }
+        let score = (value - range.min) / span
+        return magneticAverageColor(min(1, max(0, score)))
     }
 
     private func drawEmptyWalkableGrid(in context: inout GraphicsContext, transform: MapTransform) {
@@ -679,6 +734,16 @@ struct FloorPlanHeatmapCanvas: View {
         if score < 0.2 { return Color.blue.opacity(0.7) }
         if score < 0.45 { return Color.cyan.opacity(0.8) }
         if score < 0.7 { return Color.orange.opacity(0.85) }
+        return Color.red.opacity(0.9)
+    }
+
+    // Absolute-field-average ramp: blue = low, red = high, normalized across the
+    // surveyed cells so relative field variation reads at a glance.
+    private func magneticAverageColor(_ score: Double) -> Color {
+        if score < 0.2 { return Color.blue.opacity(0.72) }
+        if score < 0.4 { return Color.cyan.opacity(0.8) }
+        if score < 0.6 { return Color.green.opacity(0.82) }
+        if score < 0.8 { return Color.yellow.opacity(0.86) }
         return Color.red.opacity(0.9)
     }
 

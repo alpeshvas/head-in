@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SessionsView: View {
     @State private var sessions: [SessionFile] = []
+    @State private var showDeleteAllConfirmation = false
 
     var body: some View {
         List {
@@ -31,6 +32,32 @@ struct SessionsView: View {
             .onDelete(perform: delete)
         }
         .navigationTitle("Sessions")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button(role: .destructive) {
+                        showDeleteAllConfirmation = true
+                    } label: {
+                        Label("Delete all sessions", systemImage: "trash")
+                    }
+                    .disabled(sessions.isEmpty)
+                } label: {
+                    Label("Manage", systemImage: "ellipsis.circle")
+                }
+            }
+        }
+        .confirmationDialog(
+            "Delete all \(sessions.count) session\(sessions.count == 1 ? "" : "s")?",
+            isPresented: $showDeleteAllConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete all", role: .destructive) {
+                deleteAll()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes every recorded survey from the app. Copies exported via the share sheet are unaffected.")
+        }
         .onAppear(perform: reload)
         .refreshable { reload() }
     }
@@ -50,6 +77,13 @@ struct SessionsView: View {
     private func delete(at offsets: IndexSet) {
         for index in offsets {
             try? FileManager.default.removeItem(at: sessions[index].url)
+        }
+        reload()
+    }
+
+    private func deleteAll() {
+        for session in sessions {
+            try? FileManager.default.removeItem(at: session.url)
         }
         reload()
     }

@@ -72,6 +72,8 @@ struct MagneticHeatmapCell: Codable, Identifiable, Hashable {
 enum HeatmapMode2D: String, CaseIterable, Identifiable {
     case surveyStrength
     case magneticFieldChange
+    case magneticMeanMagnitude
+    case magneticMeanVertical
 
     var id: String { rawValue }
 
@@ -79,6 +81,8 @@ enum HeatmapMode2D: String, CaseIterable, Identifiable {
         switch self {
         case .surveyStrength: return "Survey strength"
         case .magneticFieldChange: return "Magnetic change"
+        case .magneticMeanMagnitude: return "Mag avg"
+        case .magneticMeanVertical: return "Vert avg"
         }
     }
 
@@ -88,6 +92,10 @@ enum HeatmapMode2D: String, CaseIterable, Identifiable {
             return "Coverage from sample count and repeated passes. Green means this area has enough survey data."
         case .magneticFieldChange:
             return "Magnetic texture/gradient strength. Hotter areas should help particles localize faster."
+        case .magneticMeanMagnitude:
+            return "Average total magnetic-field magnitude per cell (µT). This is the primary fingerprint the runtime matches against."
+        case .magneticMeanVertical:
+            return "Average gravity-aligned vertical magnetic component per cell (µT). Adds a second matching dimension."
         }
     }
 }
@@ -248,12 +256,16 @@ enum DemoVenueMap2D {
                 let steelAnomaly = 7.5 * exp(-0.5 * (pow((x - 19) / 2.2, 2) + pow((y - 4) / 1.4, 2)))
                 let doorwayChange = 3.2 * exp(-0.5 * pow((x - 8.5) / 0.8, 2))
                 let baseTexture = 0.9 + 0.35 * sin(x * 0.8) + 0.25 * cos(y * 1.1)
+                let meanMagnitude = 49.0 + steelAnomaly - 2.0 * cos(y * 0.6)
+                let meanVertical = -18.0 + steelAnomaly * 0.6 + 6.0 * sin(x * 0.5)
                 out.append(MagneticHeatmapCell(
                     center: MapPoint2D(x: x, y: y),
                     cellSizeMeters: cellSize,
                     sampleCount: sampleCount,
                     passCount: passCount,
-                    magneticChangeUT: max(0, baseTexture + steelAnomaly + doorwayChange)
+                    magneticChangeUT: max(0, baseTexture + steelAnomaly + doorwayChange),
+                    meanMagnitudeUT: meanMagnitude,
+                    meanVerticalUT: meanVertical
                 ))
             }
         }
