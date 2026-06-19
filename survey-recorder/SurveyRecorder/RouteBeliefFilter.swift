@@ -357,6 +357,8 @@ final class RouteBeliefFilter {
         }
         if matches.isEmpty {
             guard abs(deltaDeg) >= FilterParams.turnNegativeMinDeg else { return false }
+            // On-route confidence BEFORE this U-turn's OFF injection (§16 mid-route gate).
+            let pOffBeforeTurn = pOff
             var moved = 0.0
             for i in belief.indices {
                 let leak = belief[i] * FilterParams.turnUTurnOffLeak
@@ -376,11 +378,27 @@ final class RouteBeliefFilter {
                 let mean = meanBin
                 let firstSeg = profile.segments[0]
                 let lastSeg = profile.segments[profile.segments.count - 1]
+                let firstSegEnd = Double(firstSeg.startBin + firstSeg.count)
                 let atEnd = mean >= Double(lastSeg.startBin)
-                let atStart = mean < Double(firstSeg.startBin + firstSeg.count)
+                let atStart = mean < firstSegEnd
+                // Route-level property: does the route contain its own ~180° turn?
+                // (Sub-expression extracted to keep the type-checker fast.)
+                let routeHasOwnUTurn = profile.turns.contains { abs($0.deltaDeg) >= FilterParams.turnReversalMinDeg }
+                // MID-ROUTE turnaround (§16): an on-route U-turn before the route end,
+                // on a route with NO ~180° turn of its own (so it is unambiguously a
+                // reversal, not walking through the route's own U-turn — Ravi/L478
+                // stay terminus-only). Gate on pre-turn pOff (on-route, NOT pace).
+                let midRouteFlip = !returning && pOffBeforeTurn < FilterParams.offRouteTau
+                    && mean >= firstSegEnd && !routeHasOwnUTurn
                 if !returning && atEnd {
                     returning = true
                     revCursor = profile.turns.count - 1   // recapture corners end-first
+                } else if midRouteFlip {
+                    returning = true
+                    revCursor = -1                        // recapture only corners already passed
+                    for i in profile.turns.indices where Double(profile.turns[i].bin) < mean {
+                        revCursor = i
+                    }
                 } else if returning && atStart {
                     returning = false
                     revCursor = -1

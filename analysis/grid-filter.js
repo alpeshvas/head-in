@@ -618,6 +618,10 @@ class RouteGridFilter {
       // uninformative; an unmatched U-turn-scale rotation is a transition
       // into OFF plus a sustained leak while the heading stays unexplained.
       if (Math.abs(deltaDeg) < PARAMS.turnNegativeMinDeg) return false;
+      // Capture on-route confidence BEFORE this U-turn's OFF injection, so the
+      // mid-route flip gate (§16) reflects "was the walker on-route when they
+      // turned", not the 0.5 OFF this very turn is about to add.
+      const pOffBeforeTurn = this.pOff;
       let moved = 0;
       for (let i = 0; i < this.belief.length; i++) {
         const leak = this.belief[i] * PARAMS.turnUTurnOffLeak;
@@ -647,6 +651,31 @@ class RouteGridFilter {
         if (!this.returning && atEnd) {
           this.returning = true;                       // turnaround at route end
           this.revCursor = this.gp.turns.length - 1;   // recapture corners end-first
+        } else if (!this.returning && pOffBeforeTurn < PARAMS.offRouteTau
+                   && mean >= firstSeg.startBin + firstSeg.count
+                   && !this.gp.turns.some((t) => Math.abs(t.deltaDeg) >= PARAMS.turnReversalMinDeg)) {
+          // MID-ROUTE turnaround (§16): the user walked out partway and U-turned
+          // before the route end. Gate on "real reversal", not pacing:
+          //  - pOff < offRouteTau (captured BEFORE this turn's OFF injection):
+          //    confidently ON-ROUTE. If the filter knows where the walker is,
+          //    in-place pacing is not the worry — do NOT pace-gate an on-route
+          //    walker (the confinement gate wrongly blocked exactly this). Pacing
+          //    that has not localized has high pOff -> blocked.
+          //  - mean past the first segment: actually walked into the route.
+          //  - the ROUTE has NO ~180° turn anywhere in its signature: a mid-route
+          //    U-turn on such a route is UNAMBIGUOUSLY a reversal. On routes that
+          //    DO contain their own ~180° turn (Ravi 170°, L478 181°/215°), a
+          //    mid-route U-turn is indistinguishable from walking THROUGH that turn
+          //    (§9 regression), and a POSITION-based guard is unreliable because on
+          //    weak routes the tracked mean isn't at the turn bin when it fires —
+          //    so those routes stay terminus-only until the magnetic-shape reverse
+          //    cross-check (§3.5) is built. (LIS qualifies: corners are 74/72/80°.)
+          // Recapture only the corners already PASSED (bin < current mean), end-first.
+          this.returning = true;
+          this.revCursor = -1;
+          for (let i = 0; i < this.gp.turns.length; i++) {
+            if (this.gp.turns[i].bin < mean) this.revCursor = i;
+          }
         } else if (this.returning && atStart) {
           this.returning = false;                      // back at the start
           this.revCursor = -1;
@@ -931,6 +960,8 @@ function replay(profile, session) {
       // guard (§3.6c) still decides whether the flip actually happens.
       const routeDone = checkpointStates.every((cp) => cp.firedAt !== null);
       if (routeDone && !filter.returning && Math.abs(ev.deltaDeg) < PARAMS.turnReversalMinDeg) continue;
+      // Mid-route turnaround (§16) is decided inside observeTurn (pOff on-route +
+      // not near a route's own ~180° turn), not pace-gated — see the method.
       const matched = filter.observeTurn(ev.deltaDeg);
       turnLog.push({ t: ev.t, deltaDeg: ev.deltaDeg, matched, support: filter.lastTurnSupport, pOffAfter: filter.pOff });
     } else {
