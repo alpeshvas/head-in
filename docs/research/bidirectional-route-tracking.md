@@ -493,3 +493,71 @@ offline matrix.
 **Out of scope (unchanged):** free-roam / any-order / shortcuts (free-roam NO-GO);
 backward-from-far-end cold start (needs entrance anchoring, STATUS L96–L100);
 pocket-carry latch (turn evidence disabled in pocket — §3.1).
+
+---
+
+## 8. First round-trip recordings captured & analyzed (2026-06-19)
+
+Two out-and-back traces on **Office-Near LIS** (hand, ARKit GT), the first
+round-trip recordings in the repo (prior to this, every trace was `forward`):
+- `recordings-new/Office-Near_LIS_roundtrip_hand_normal_20260619-163708.jsonl`
+  (rounded turnarounds, ~2 laps)
+- `recordings-new/Office-Near_LIS_roundtrip_hand_normal_20260619-165928_crisp-pivot.jsonl`
+  (single clean out-and-back, crisp in-place pivot)
+
+Research harness: `analysis/bidir-replay.js` (standalone; does NOT touch the
+shipped `grid-filter.js` / `RouteBeliefFilter.swift`). Latch report, reverse
+emission read, and a direction-aware `DirectionalFilter` prototype with ARKit
+ground truth for both legs (turnaround located from the gyro U-turn, not
+displacement — a square route makes displacement-from-start useless).
+
+### 8.1 VALIDATED: the latch-toggle mechanism (§3) — crisp pivot gives a clean U-turn
+
+On the crisp-pivot trace, `turn-events.js` measured the in-place turnaround as
+**−200°**, cleanly separated from the route's own corners (the square's corners
+all read ≤90°: +86/−54/+71/+89 outbound). With `UTURN_MIN_DEG`=140 the
+turnaround is the *only* event that flips the latch; the corners are correctly
+ignored. **This answers the single biggest open question from §3: a gyro U-turn
+CAN reliably flag the reversal when the user pivots in place.** The first
+(rounded) trace confirms the §3.2 failure mode is real too — of its ~3 physical
+turnarounds only 1 produced a clean ≥140° event; the others fragmented into
+~75–86° pieces (rounded arc → sub-threshold rotation regions). So: crisp pivot
+→ reliable latch; rounded turnaround → the magnetic-shape reverse cross-check
+(§3.5) is **load-bearing, not optional**.
+
+### 8.2 NOT ANSWERED on this venue: the §2 reverse-tracking claim — LIS field too weak
+
+The reverse-tracking validation (does the differenced emission, read backward,
+track the return leg at the same 1–3 m as forward?) **could not be answered on
+LIS**, for a venue reason, not a code reason:
+
+- The bare-emission **argmax** does not ridge even FORWARD here (1/68 within 1.5
+  strides of truth) — pointwise magnitude is too weakly discriminative (the
+  documented LIS weak-field finding; offLogLik −3.6). What makes the shipped
+  filter localize is the step prior accumulating over time, not the emission
+  argmax — so an argmax probe is the wrong test.
+- The full **shipped `grid-filter.js`** saturates **P(OFF)=1.0 even on the LIS
+  profile's OWN survey passes** (`...023522`, `...023742`) — the filter cannot
+  hold a confident posterior on this venue at all. With no clean forward
+  baseline, there is nothing to compare reverse tracking against.
+
+The direction-aware `DirectionalFilter` replay therefore produced untrustworthy
+numbers (forward leg P50 ~17 m — diverging like the shipped filter does here),
+so **no §2 verdict** is drawn from LIS. The harness's hand-rolled event loop
+also lacks the shipped `replay()` stabilizers (idle ticks, terminal freeze,
+unobserved-leak) — a second reason its absolute numbers aren't comparable; the
+proper integration is to drive the real `replay()` path, deferred.
+
+### 8.3 What this changes / next step
+
+- Verdict UNCHANGED: **CONDITIONAL-GO**. The latch mechanism is now empirically
+  validated (8.1); the reverse-tracking claim (§2) remains *untested*, not
+  refuted.
+- **The §2 test needs a STRONG-FIELD venue round-trip** (Plumeria Test ~12 m or
+  L478, which track sub-meter forward) — exactly what §7 anticipated. Capture
+  one clean single out-and-back (crisp pivot, ARKit GT) at a Plumeria route;
+  then `bidir-replay.js --oracle` / `--filter` gives a trustworthy answer
+  because the forward baseline is clean there.
+- Harness TODO when resumed: integrate direction-awareness into
+  `grid-filter.js`'s real `replay()` rather than the parallel loop, so absolute
+  metrics match the shipped filter.
