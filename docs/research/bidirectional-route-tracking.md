@@ -561,3 +561,36 @@ proper integration is to drive the real `replay()` path, deferred.
 - Harness TODO when resumed: integrate direction-awareness into
   `grid-filter.js`'s real `replay()` rather than the parallel loop, so absolute
   metrics match the shipped filter.
+
+## 9. SHIPPED: backward-walk detection latch (2026-06-19, §3.6 + §4-C)
+
+Built the **detect-reversal-and-suppress** increment (NOT reverse tracking,
+which stays deferred per §8.2) into the shipped filters, in JS↔Swift parity:
+
+- **`returning` latch** (`grid-filter.js` + `RouteBeliefFilter.swift`): a
+  persistent forward/backward state. Toggled in `observeTurn`'s unmatched
+  branch when |Δ| ≥ `turnReversalMinDeg`=140° AND the posterior is at the
+  relevant **terminus** (last segment → flip to backward; first segment → flip
+  to forward). The terminus guard is the §3.6(c) condition and is what prevents
+  a route's OWN mid-route U-turn from flipping the latch.
+- **`reversalActive()`** now returns `reversalStepsLeft > 0 || returning`, so
+  checkpoint fires stay suppressed for the WHOLE return leg, not just the
+  8-step reversal window. UI surfaces "Returning" (`LivePositioningController`).
+- **Zero regressions** (replay matrix, graded cases identical: Test P50 0.62
+  ok×3, L478 P50 0.27 ok×6, Ravi P50 0.37 ok,ok,ok,MISSED). **Iteration 1
+  regressed Ravi** (a mid-route +178° unmatched turn flipped the latch →
+  Checkpoint 2 ok→late); **the terminus guard fixed it** — the spurious turn
+  fires when belief is mid-route, not in the last segment.
+- **Parity green**: 6/6 `FilterParityTests` pass including a new
+  `parity-fixture-lis-roundtrip` fixture; `reversalActive` is now asserted in
+  the fixture so a JS↔Swift latch-wiring divergence is caught.
+- Unit-checked in isolation: latch flips on an at-end ≥140° U-turn, flips off
+  at start, ignores mid-route turns and <140° turns.
+
+**Known limitation (same root as §8.2):** on the LIS round-trip the `returning`
+latch does **not** actually engage, because the weak field keeps the posterior
+mid-route (bin ~460) when the physical U-turn fires at ~27 m (bin ~1670) — so
+the terminus guard correctly refuses to flip. The latch is therefore *built and
+parity-safe but not yet demonstrated engaging end-to-end*; that demonstration
+needs a **strong-field round-trip** (Plumeria) where forward tracking reaches
+the terminus. The mechanism is correct (unit-checked); the venue is the blocker.

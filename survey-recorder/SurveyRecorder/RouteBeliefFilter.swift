@@ -34,6 +34,13 @@ enum FilterParams {
     static let turnUTurnOffLeak = 0.5
     static let turnReversalLeakPerStep = 0.12
     static let turnReversalSteps = 8
+    // Direction-latch toggle threshold (bidirectional-route-tracking.md §3.6): an
+    // unmatched rotation this large is a genuine ~180° reversal (toggles the
+    // forward/backward latch), distinct from a ~90° route corner. Measured on the
+    // first round-trip: crisp turnaround −200°, route corners ≤90° (§8.1). Tighter
+    // than turnNegativeMinDeg (100°) on purpose: a 100–139° unmatched turn injects
+    // OFF but does NOT flip travel direction.
+    static let turnReversalMinDeg = 140.0
     static let turnMatchMinSupport = 0.1
     // Posterior mean must be within this many sigma of a matched turn bin (the
     // filter must believe the walker is AT the turn). Rejects pacing U-turns
@@ -152,6 +159,14 @@ final class RouteBeliefFilter {
     private(set) var belief: [Double]
     private(set) var pOff: Double = 0
     private var reversalStepsLeft = 0
+    /// Direction latch (bidirectional-route-tracking.md §3.6 + §4-C): a persistent
+    /// forward/backward state toggled by a near-180° U-turn detected at a route
+    /// terminus. While `returning`, checkpoint fires stay suppressed for the WHOLE
+    /// return leg (via reversalActive), not just the 8-step reversal window. This
+    /// is the validated detect-reversal-and-suppress increment, NOT reverse
+    /// position tracking (deferred, §8.2). Exposed for the Live UI "Returning"
+    /// status.
+    private(set) var returning = false
     /// Last mode while confidently on-route — OFF re-entry anchors here
     /// (route-constrained-fusion.md: "re-entry kernel centered on last
     /// on-route mode").
@@ -270,9 +285,11 @@ final class RouteBeliefFilter {
     /// belief that already has support near the signature bin; an unmatched
     /// U-turn-scale rotation is a transition into OFF plus a sustained leak
     /// while the heading stays unexplained. Returns true on a signature match.
-    /// True while recent motion is unexplained (after an unmatched U-turn):
-    /// checkpoint decisions must not fire on progress made in this state.
-    var reversalActive: Bool { reversalStepsLeft > 0 }
+    /// True while recent motion is unexplained (after an unmatched U-turn) OR the
+    /// direction latch says the walker is returning: checkpoint decisions must not
+    /// fire on progress made in either state. The `returning` latch extends fire
+    /// suppression across the whole return leg (§3.6/§4-C).
+    var reversalActive: Bool { reversalStepsLeft > 0 || returning }
 
     @discardableResult
     func observeTurn(deltaDeg: Double) -> Bool {
@@ -311,6 +328,22 @@ final class RouteBeliefFilter {
             }
             pOff += moved
             reversalStepsLeft = FilterParams.turnReversalSteps
+            // Direction latch: a near-180° unmatched rotation flips forward/
+            // backward, but only when the posterior is at the relevant TERMINUS
+            // (last segment for an end turnaround; first segment for a return to
+            // start). This separates a genuine turnaround from a route's own
+            // U-turn region that failed to match mid-route. A 100–139° turn
+            // injects OFF as before but never flips the latch. (See JS
+            // grid-filter.js observeTurn; bidirectional-route-tracking.md §3.6.)
+            if abs(deltaDeg) >= FilterParams.turnReversalMinDeg {
+                let mean = meanBin
+                let firstSeg = profile.segments[0]
+                let lastSeg = profile.segments[profile.segments.count - 1]
+                let atEnd = mean >= Double(lastSeg.startBin)
+                let atStart = mean < Double(firstSeg.startBin + firstSeg.count)
+                if !returning && atEnd { returning = true }
+                else if returning && atStart { returning = false }
+            }
             normalize()
             return false
         }

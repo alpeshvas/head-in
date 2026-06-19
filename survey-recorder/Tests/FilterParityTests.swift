@@ -27,6 +27,8 @@ final class FilterParityTests: XCTestCase {
         let pOff: Double
         let probBeyond: [Double]
         let belief: [Double]?
+        // Direction-latch state (optional: older fixtures predate it).
+        let reversalActive: Bool?
     }
 
     // Cross-libm drift only: the op order is identical in both implementations,
@@ -53,6 +55,16 @@ final class FilterParityTests: XCTestCase {
 
     func testRaviPlacePacingTraceParity() throws {
         try runFixture(named: "parity-fixture-ravi-pacing")
+    }
+
+    /// Round-trip (out-and-back) trace: exercises the U-turn / reversal path and
+    /// the direction-latch wiring in reversalActive (bidirectional-route-tracking.md
+    /// §8). On this weak-field venue the `returning` latch does not itself flip
+    /// (belief never reaches the terminus), but the reversalActive parity guards
+    /// the JS<->Swift toggle wiring; a strong-field round-trip would also exercise
+    /// the flip.
+    func testLISRoundTripTraceParity() throws {
+        try runFixture(named: "parity-fixture-lis-roundtrip")
     }
 
     private func runFixture(named name: String) throws {
@@ -88,6 +100,9 @@ final class FilterParityTests: XCTestCase {
             XCTAssertEqual(filter.pOff, op.expect.pOff, accuracy: probTolerance, "\(label) pOff")
             for (k, bin) in fixture.probeBins.enumerated() {
                 XCTAssertEqual(filter.probBeyond(bin: bin), op.expect.probBeyond[k], accuracy: probTolerance, "\(label) probBeyond(\(bin))")
+            }
+            if let expectedReversal = op.expect.reversalActive {
+                XCTAssertEqual(filter.reversalActive, expectedReversal, "\(label) reversalActive (direction latch)")
             }
             if let expected = op.expect.belief {
                 XCTAssertEqual(expected.count, filter.belief.count, "\(label) belief length")

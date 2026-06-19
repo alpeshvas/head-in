@@ -74,6 +74,14 @@ const PARAMS = {
   turnUTurnOffLeak: 0.5,     // on-route mass moved to OFF at the reversal itself
   turnReversalLeakPerStep: 0.12, // extra per-step leak after an unexplained reversal
   turnReversalSteps: 8,      // how many steps the reversal leak lasts
+  // Direction-latch toggle threshold (bidirectional-route-tracking.md §3.6): an
+  // unmatched rotation this large is a genuine ~180° REVERSAL (toggles the
+  // forward/backward latch), distinct from a ~90° route corner. Measured on the
+  // first round-trip: crisp turnaround = -200°, route corners ≤90° (§8.1), so
+  // 140° cleanly separates them. Tighter than turnNegativeMinDeg (100°, the OFF
+  // threshold) on purpose: a 100–139° unmatched turn still injects OFF but does
+  // NOT flip the travel direction.
+  turnReversalMinDeg: 140,
   // A signature match only counts when the posterior already places this much
   // of its on-route mass within 3 sigma of a matched turn bin. Without the
   // gate, pacing U-turns on a route that itself contains a U-turn "match" from
@@ -300,6 +308,15 @@ class RouteGridFilter {
     for (let i = 0; i < Math.min(8, globalProfile.bins); i++) this.belief[i] = Math.exp(-i / 3);
     this.pOff = 0.0;
     this.reversalStepsLeft = 0;
+    // Direction latch (docs/research/bidirectional-route-tracking.md §3.6 + §4-C):
+    // a persistent forward/backward state toggled by a detected near-180° U-turn.
+    // While `returning`, checkpoint fires stay suppressed for the WHOLE return
+    // leg (not just the 8-step reversal window) — this is the validated
+    // "detect reversal → suppress + flag" increment, NOT reverse position
+    // tracking (which needs a strong-field round-trip to validate, §8.2). The
+    // U-turn detection itself is validated: a crisp pivot reads as ~-200° vs the
+    // route's own ≤90° corners (§8.1).
+    this.returning = false;
     // Last mode while the filter was confidently on-route — OFF re-entry
     // anchors here (route-constrained-fusion.md: "re-entry kernel centered on
     // last on-route mode").
@@ -539,6 +556,27 @@ class RouteGridFilter {
       }
       this.pOff += moved;
       this.reversalStepsLeft = PARAMS.turnReversalSteps;
+      // A near-180° unmatched rotation MAY be a genuine travel-direction
+      // reversal — but only when the posterior is at the relevant TERMINUS
+      // (bidirectional-route-tracking.md §3.6 condition c): a forward→backward
+      // flip is an end-of-route turnaround (belief near the last bin); a
+      // backward→forward flip is a return-to-start (belief near bin 0). This
+      // separates the genuine turnaround from a route's OWN U-turn region that
+      // failed to match mid-route (Ravi +178°@mid-route must NOT flip the
+      // latch — that regressed a forward walk in iteration 1). A 100–139°
+      // unmatched turn injects OFF as before but never flips the latch.
+      if (Math.abs(deltaDeg) >= PARAMS.turnReversalMinDeg) {
+        // Terminus = the last segment (far end) / first segment (start). Route-
+        // relative, so it works across 720–1680-bin routes without a tuned
+        // absolute width.
+        const mean = this.meanBin();
+        const firstSeg = this.gp.segments[0];
+        const lastSeg = this.gp.segments[this.gp.segments.length - 1];
+        const atEnd = mean >= lastSeg.startBin;
+        const atStart = mean < firstSeg.startBin + firstSeg.count;
+        if (!this.returning && atEnd) this.returning = true;          // turnaround at route end
+        else if (this.returning && atStart) this.returning = false;   // back at the start
+      }
       this.normalize();
       return false;
     }
@@ -558,10 +596,14 @@ class RouteGridFilter {
     return true;
   }
 
-  /** True while recent motion is unexplained (after an unmatched U-turn):
-   *  checkpoint decisions must not fire on progress made in this state. */
+  /** True while recent motion is unexplained (after an unmatched U-turn) OR the
+   *  direction latch says the walker is returning: checkpoint decisions must not
+   *  fire on progress made in either state. The `returning` latch extends fire
+   *  suppression across the whole return leg (§3.6/§4-C), where the 8-step
+   *  reversal window would otherwise expire and let the forward step-march
+   *  false-advance again. */
   reversalActive() {
-    return this.reversalStepsLeft > 0;
+    return this.reversalStepsLeft > 0 || this.returning;
   }
 
   meanBin() {

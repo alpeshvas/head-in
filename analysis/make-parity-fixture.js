@@ -42,6 +42,9 @@ function main() {
     meanBin: filter.meanBin(),
     pOff: filter.pOff,
     probBeyond: probeBins.map((b) => filter.probBeyond(b)),
+    // Direction-latch state (bidirectional-route-tracking.md §3.6): asserted in
+    // parity so a JS<->Swift divergence in the terminus-guarded toggle is caught.
+    reversalActive: filter.reversalActive(),
   });
   const push = (op) => {
     op.expect = expect();
