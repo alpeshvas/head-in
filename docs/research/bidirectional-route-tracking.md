@@ -667,8 +667,34 @@ enough to tick "returning past X" checkpoints, with honest drift between corners
 **Status:** validated in the harness on one real round-trip against ARKit; **not
 yet ported to the shipped filter** (would be `observeTurn` reverse-signature
 matching gated on `returning`, in JS↔Swift parity + fixtures). It is the
-mechanism that makes to-and-fro work on a cornered, weak-field route like the
-office — the recapture, not the raw emission, carries the return there. Still
-worth a strong-field round-trip to confirm the between-corner drift shrinks where
-the emission is reliable (there recapture + emission would compound, not just
-recapture alone).
+mechanism that makes to-and-fro work on a cornered route — the recapture carries
+the return where the raw emission alone drifts.
+
+## 12. CORRECTION: LIS is NOT a weak-field venue — old profile was the problem (2026-06-19)
+
+§8.2/§10/§11 concluded "LIS field too weak, forward only ticks checkpoints
+(P(OFF)=1.0)". **That was wrong — it came from a stale 2-pass LIS profile built
+from sloppy passes.** Two fresh clean normal passes (`...201023`, `...201754`,
+hand, ARKit GT) rebuild a much better profile:
+- **6 of 7 segments STRONG** (r 0.87–1.00); only segment 5 Kitchen→Ops table is
+  weak (r 0.34, a long open stretch). Calibration σ2.09 / offLL −3.73.
+- **Leave-one-out forward vs ARKit: A→B 7/7 ok, P50 0.91 m / P75 2.01 m;
+  B→A 7/7 fired, P50 0.69 m** (P75 27 m tail from segment 5's wrong-mode
+  excursion, recovered). **LIS forward genuinely tracks sub-meter** — the user
+  was right that "forward worked", and the earlier weak-field verdict was a
+  profile artifact, not a venue property.
+
+**Re-grounded backward result on the crisp-pivot round-trip with the FRESH
+profile:**
+- Forward leg: **P50 3.54 m** (was a bogus 17 m under the stale profile).
+- Backward, plain −stride: P50 13.6 m (drifts on weak segment 5).
+- Backward, **+ reversed-turn recapture: P50 7.59 m / P75 10.70 m** — corners
+  re-pin cleanly (1463→1219→514), ~2× the forward error, remaining gap
+  concentrated on the one weak segment between corners.
+
+**Net:** with a properly-built profile, LIS forward is ~0.7–0.9 m (leave-one-out)
+and the backward return tracks at ~7.6 m with recapture (corner-grade, limited by
+the single weak segment). The bundled profile + parity fixture were updated to
+the fresh passes (6/6 parity still green). This is the real grounding: to-and-fro
+**does** work on the office once the profile is good; the recapture is what
+carries the weak segment on the return.
