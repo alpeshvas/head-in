@@ -634,3 +634,41 @@ still-pending strong-field live round-trip to validate against real sensor data
 (this test used synthesized clean windows, which isolate the math but omit live
 noise). The deployed live build uses the **detect+suppress** behavior (§9), which
 is safe; the −stride tracking is not wired into the Live decision path.
+
+## 11. Reversed turn-sequence RECAPTURE — makes the office (LIS) return leg work (2026-06-19, §3.5)
+
+Built option (a) from §10's verdict: on the return leg, match detected turns
+against the profile's turn signature read in **reverse order with flipped sign**,
+and on a match perform a **landmark RESET** (UnLoc-style) — replace belief with a
+Gaussian at that corner's bin. Harness: `bidir-replay.js --recapture`.
+
+**Measured on the real LIS crisp-pivot round-trip vs ARKit GT** (the venue whose
+weak field defeated plain −stride tracking, §8/§10):
+- The return-leg corners match the reversed signature cleanly and **in order**
+  (the order constraint is essential — LIS corners are 76°/92°, too close to
+  disambiguate by magnitude; a `_revCursor` consumes the signature end-first):
+  −79°→bin 1452, −90°→bin 1211, −71°→bin 516.
+- **Return-leg P50: 34 m → 10 m, P75: 38 m → 18 m** (a 3.4× improvement). Right
+  after each corner re-pin the error collapses to 2–8 m; it then drifts up over
+  the long weak-field segment until the next corner resets it (classic
+  landmark-reset sawtooth).
+- Same result with the **real gyro flip** as with the oracle flip (the crisp
+  pivot fires the U-turn at the true turnaround), so this is the honest
+  end-to-end number, not an oracle artifact.
+
+**Honest framing of "10 m":** it is NOT smooth 1–3 m tracking. But on LIS the
+**forward** leg's raw posterior mean is *also* ~17 m off — forward only "works"
+live via the displayBin ratchet + ordered checkpoint fires (step-count ticking on
+a mostly-transition route), NOT via a confident magnetic position (P(OFF)=1.0 even
+on LIS's own survey passes). So recapture brings the **return leg up to the same
+regime as the forward leg** on this weak venue: corner-grade re-localization, good
+enough to tick "returning past X" checkpoints, with honest drift between corners.
+
+**Status:** validated in the harness on one real round-trip against ARKit; **not
+yet ported to the shipped filter** (would be `observeTurn` reverse-signature
+matching gated on `returning`, in JS↔Swift parity + fixtures). It is the
+mechanism that makes to-and-fro work on a cornered, weak-field route like the
+office — the recapture, not the raw emission, carries the return there. Still
+worth a strong-field round-trip to confirm the between-corner drift shrinks where
+the emission is reliable (there recapture + emission would compound, not just
+recapture alone).

@@ -316,9 +316,46 @@ class DirectionalFilter extends RouteGridFilter {
     this.normalize();
     return true;
   }
+
+  /** Reversed turn-sequence RECAPTURE (bidirectional-route-tracking.md §3.5):
+   *  on the return leg, a detected turn that matches the profile's signature
+   *  read with flipped sign re-pins belief to that turn's bin (UnLoc-style
+   *  landmark reset). This re-localizes on a weak field where the magnetic
+   *  emission alone cannot hold position between corners. `signature` is the
+   *  profile turns; we match on sign-flipped magnitude. Returns the matched bin
+   *  or null. */
+  recaptureReverse(deltaDeg, signature, tolDeg = 55) {
+    if (this.direction !== 'backward') return null;
+    // Enforce REVERSE ORDER: on the return leg corners are re-crossed in the
+    // reverse of the survey order, so consume the signature from the end. The
+    // next expected corner is signature[reverseCursor]; matching by order (not
+    // nearest magnitude) is essential when corner magnitudes are close
+    // (76° vs 92° here). reverseCursor starts at the last signature index when
+    // the latch flips to backward.
+    if (this._revCursor === undefined) this._revCursor = signature.length - 1;
+    if (this._revCursor < 0) return null;
+    const turn = signature[this._revCursor];
+    const expected = -turn.deltaDeg; // opposite sign on the return
+    if (Math.sign(expected) !== Math.sign(deltaDeg) || Math.abs(deltaDeg - expected) > tolDeg) {
+      return null; // not the next expected corner; ignore (don't consume)
+    }
+    this._revCursor -= 1;
+    // Landmark RESET (UnLoc-style): on a weak field the magnetic emission is
+    // unreliable, so a matched corner should DOMINATE, not gently reweight.
+    // Replace belief with a Gaussian at the corner bin (coarse sigma) rather
+    // than multiply the (wrong, confident) prior.
+    const bin = turn.bin;
+    const sigma = Math.max(turn.sigmaBins, 8) * 2;
+    for (let i = 0; i < this.belief.length; i++) {
+      this.belief[i] = Math.exp(-0.5 * ((i - bin) / sigma) ** 2);
+    }
+    this.pOff = 0.05;
+    this.normalize();
+    return bin;
+  }
 }
 
-function directionalReplay(profile, session, { latchMode = 'gyro' } = {}) {
+function directionalReplay(profile, session, { latchMode = 'gyro', recapture = false } = {}) {
   const gp = buildGlobalProfile(profile);
   const gt = buildTrueBinMapper(session, gp);
   if (!gt) { console.log('No usable single-lap ground truth — aborting directional replay.'); return; }
@@ -326,24 +363,40 @@ function directionalReplay(profile, session, { latchMode = 'gyro' } = {}) {
   const steps = detectSteps(session.dm);
   const provider = makeWindowProvider(session.dm, steps);
   const filter = new DirectionalFilter(gp);
+  const signature = gp.turns || [];
 
+  const allTurns = detectTurns(session.dm).filter((tr) => tr.t >= t0);
   // Latch flips: from the gyro U-turn (real-world), or — for an upper-bound
   // ("does reverse tracking even work if the latch were perfect?") — from the
   // ARKit turnaround time itself.
   const flipTimes = latchMode === 'oracle'
     ? [gt.turnT]
-    : detectTurns(session.dm).filter((tr) => Math.abs(tr.deltaDeg) >= UTURN_MIN_DEG && tr.t >= t0).map((tr) => tr.t);
+    : allTurns.filter((tr) => Math.abs(tr.deltaDeg) >= UTURN_MIN_DEG).map((tr) => tr.t);
 
   const events = [];
   for (const t of steps) events.push({ t, kind: 'step' });
   for (const ft of flipTimes) events.push({ t: ft, kind: 'flip' });
+  // Recapture turns: the non-U-turn corners (the U-turn drives the flip, not a
+  // corner match). Only fed when recapture is on.
+  if (recapture) {
+    for (const tr of allTurns) {
+      if (Math.abs(tr.deltaDeg) >= UTURN_MIN_DEG) continue; // that's the flip
+      events.push({ t: tr.endT, kind: 'recapture', deltaDeg: tr.deltaDeg });
+    }
+  }
   events.sort((a, b) => a.t - b.t);
 
   const rows = [];
+  const recaptures = [];
   let fwdErr = [], retErr = [];
   for (const ev of events) {
     if (ev.kind === 'flip') {
       filter.direction = filter.direction === 'forward' ? 'backward' : 'forward';
+      continue;
+    }
+    if (ev.kind === 'recapture') {
+      const bin = filter.recaptureReverse(ev.deltaDeg, signature);
+      if (bin !== null) recaptures.push({ t: ev.t - t0, deltaDeg: ev.deltaDeg, bin });
       continue;
     }
     filter.predictStep();
@@ -370,6 +423,11 @@ function directionalReplay(profile, session, { latchMode = 'gyro' } = {}) {
   console.log('-'.repeat(60));
   console.log(`Forward leg (n=${fwdErr.length}): P50 ${pct(fwdErr, 0.5)?.toFixed(2)} m · P75 ${pct(fwdErr, 0.75)?.toFixed(2)} m`);
   console.log(`Return  leg (n=${retErr.length}): P50 ${pct(retErr, 0.5)?.toFixed(2)} m · P75 ${pct(retErr, 0.75)?.toFixed(2)} m`);
+  if (recapture) {
+    console.log(`Recaptures (reversed-signature corner re-pins on the return leg):`);
+    for (const r of recaptures) console.log(`  t+${r.t.toFixed(1)}s  ${r.deltaDeg > 0 ? '+' : ''}${r.deltaDeg.toFixed(0)}° -> re-pinned to bin ${r.bin}`);
+    if (!recaptures.length) console.log('  (none matched)');
+  }
   console.log(`\n§2 PASS if the RETURN-leg P50 is in the same 1–3 m band as the forward leg.`);
   console.log(`(latch=oracle isolates "does reverse tracking work with a perfect flip?";`);
   console.log(` latch=gyro is the realistic end-to-end with the real ~${(flipTimes[0] - gt.turnT || 0).toFixed(1)}s-late flip.)`);
@@ -382,9 +440,10 @@ function main() {
   const ridge = argv.includes('--ridge');
   const filterMode = argv.includes('--filter');
   const oracle = argv.includes('--oracle');
+  const recapture = argv.includes('--recapture');
   const pos = argv.filter((a) => !a.startsWith('--'));
   if (pos.length !== 2) {
-    console.error('Usage: node analysis/bidir-replay.js <profile.json> <roundtrip-session.jsonl> [--ridge] [--filter] [--oracle]');
+    console.error('Usage: node analysis/bidir-replay.js <profile.json> <roundtrip-session.jsonl> [--ridge] [--filter] [--oracle] [--recapture]');
     process.exit(1);
   }
   const profile = JSON.parse(fs.readFileSync(pos[0], 'utf8'));
@@ -392,11 +451,11 @@ function main() {
   console.log(`Profile: ${profile.route.venueId}/${profile.route.routeId}  Session: ${session.file}`);
   latchReport(profile, session);
   if (ridge) ridgeReport(profile, session);
-  if (filterMode || oracle) {
-    directionalReplay(profile, session, { latchMode: oracle ? 'oracle' : 'gyro' });
+  if (filterMode || oracle || recapture) {
+    directionalReplay(profile, session, { latchMode: oracle ? 'oracle' : 'gyro', recapture });
   }
-  if (!ridge && !filterMode && !oracle) {
-    console.log('\n(flags: --filter direction-aware full-filter replay · --oracle flip at true turnaround · --ridge raw-emission argmax dump)');
+  if (!ridge && !filterMode && !oracle && !recapture) {
+    console.log('\n(flags: --filter direction-aware replay · --oracle flip at true turnaround · --recapture reversed turn re-pin · --ridge raw-emission argmax dump)');
   }
 }
 
