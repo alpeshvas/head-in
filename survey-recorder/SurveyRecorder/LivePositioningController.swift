@@ -29,6 +29,11 @@ final class LivePositioningController {
 
     private(set) var isRunning = false
     private(set) var isComplete = false
+    // Forward route done (all checkpoints fired) but the run is kept ALIVE so a
+    // U-turn can flip the direction latch and the return leg can be tracked
+    // (bidirectional-route-tracking.md §13/§15: completeRoute() used to tear the
+    // filter down here, killing return tracking before the turnaround was seen).
+    private(set) var forwardComplete = false
     private(set) var statusText = "Ready"
     private(set) var totalSampleCount = 0
     private(set) var detectedSteps = 0
@@ -164,6 +169,7 @@ final class LivePositioningController {
         reachedCheckpoints = 0
         checkpointConsecutive = 0
         isComplete = false
+        forwardComplete = false
         isRunning = true
         lastAdvanceReason = nil
         lastTurnLabel = nil
@@ -458,8 +464,15 @@ final class LivePositioningController {
                 traceWriter?.flush()
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 if reachedCheckpoints == gp.checkpoints.count {
-                    completeRoute()
-                    return
+                    // Forward route done — but DON'T tear down (that was the §13
+                    // blocker). Keep the filter, recorder and motion stream alive so
+                    // a U-turn at the end flips the `returning` latch and the return
+                    // leg tracks (−stride + reverse emission + reversed-turn
+                    // recapture, already in RouteBeliefFilter). The run ends on
+                    // manual Stop. (§15: return leg tracks ~1.7 m, 6/7 on replay.)
+                    forwardComplete = true
+                    lastAdvanceReason = "Route complete — U-turn to walk back"
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
                 }
             }
         }
@@ -468,7 +481,10 @@ final class LivePositioningController {
         // but the posterior mean can lag it or even slip backward. The segment card
         // and progress rings must never contradict the timeline, so the displayed
         // bin is floored at the first bin past the last reached checkpoint.
-        let floorBin = reachedCheckpoints > 0
+        // While returning, the displayed position must be free to RETREAT toward
+        // the start, so the forward checkpoint floor is dropped (§15). Forward, the
+        // floor still prevents the card/rings from contradicting the timeline.
+        let floorBin = (reachedCheckpoints > 0 && !filter.returning)
             ? Double(min(gp.checkpoints[reachedCheckpoints - 1].bin + 1, gp.bins - 1))
             : 0
         // While confined (pacing) the belief marches on raw step count, but the
@@ -493,6 +509,9 @@ final class LivePositioningController {
             // surface the state rather than silently mis-track the return leg
             // (bidirectional-route-tracking.md §4-C).
             statusText = "Returning"
+        } else if forwardComplete {
+            // Forward route done, latch not yet flipped: prompt the to-and-fro test.
+            statusText = "Route complete · U-turn to walk back"
         } else if confined {
             statusText = "Holding position"
         } else if reachedCheckpoints < gp.checkpoints.count,
