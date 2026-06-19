@@ -64,6 +64,7 @@ final class TwoDSurveyWriter {
             "mag": [
                 "magnitudeUT": jsonRound(sample.magnetic.magnitudeUT, 4),
                 "verticalUT": jsonRound(sample.magnetic.verticalUT, 4),
+                "horizontalUT": jsonRound(sample.magnetic.horizontalUT, 4),
                 "acc": sample.magnetic.accuracyRawValue,
             ],
         ]

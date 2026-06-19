@@ -23,6 +23,7 @@ const PARAMS = {
   magneticSigmaUT: 3.0,
   absoluteMagneticSigmaUT: 5.0,
   deltaMagneticSigmaUT: 3.0,
+  deltaReciprocalResidualFloor: 0.25,
   surveyedCellNoPenaltyDistanceM: 0.75,
   surveyedCellDistanceSigmaM: 0.75,
   surveyedCellPenaltyFloor: 0.02,
@@ -69,11 +70,14 @@ function readSamples(file) {
     let obj;
     try { obj = JSON.parse(line); } catch { return []; }
     if (obj.type !== 'sample2d' || !obj.map || !obj.mag) return [];
+    const mag = Number(obj.mag.magnitudeUT);
+    const bv = Number(obj.mag.verticalUT);
+    const bhRaw = Number(obj.mag.horizontalUT);
     const sample = {
       t: Number(obj.t), x: Number(obj.map.x), y: Number(obj.map.y),
-      mag: Number(obj.mag.magnitudeUT), bv: Number(obj.mag.verticalUT), roomId: obj.roomId || null,
+      mag, bv, bh: Number.isFinite(bhRaw) ? bhRaw : Math.sqrt(Math.max(0, mag * mag - bv * bv)), roomId: obj.roomId || null,
     };
-    return [sample].filter((s) => [s.t, s.x, s.y, s.mag, s.bv].every(Number.isFinite));
+    return [sample].filter((s) => [s.t, s.x, s.y, s.mag, s.bv, s.bh].every(Number.isFinite));
   }).sort((a, b) => a.t - b.t);
 }
 
@@ -132,7 +136,7 @@ function nearestCell(cells, p) {
 function nearestCellDistance(cells, p) {
   const cell = nearestCell(cells, p);
   if (!cell) return Infinity;
-  return Math.hypot(cell.center.x - p.x, cell.center.y - p.y);
+  return Math.hypot(cell.center.x - p.x, cell.center.y - p.y) + Math.max(0, cell.supportDistanceMeters || 0);
 }
 
 class Filter {
@@ -160,7 +164,7 @@ class Filter {
   }
   observe(sample, previous) {
     if (this.mode === 'coverage') return;
-    const hasAbsolute = this.cells.some((cell) => Number.isFinite(cell.meanMagnitudeUT) && Number.isFinite(cell.meanVerticalUT));
+    const hasAbsolute = this.cells.some((cell) => Number.isFinite(cell.meanMagnitudeUT) && Number.isFinite(cell.meanVerticalUT) && Number.isFinite(cell.meanHorizontalUT));
     for (const p of this.particles) {
       const expected = nearestCell(this.cells, p);
       if (!expected) continue;
@@ -170,22 +174,29 @@ class Filter {
         p.w *= Math.exp(-0.5 * r * r / v);
       } else {
         if (this.mode === 'absolute' || this.mode === 'combo') {
+          if (![expected.meanMagnitudeUT, expected.meanVerticalUT, expected.meanHorizontalUT].every(Number.isFinite)) continue;
           const floor = this.mode === 'combo' ? 8.0 : PARAMS.absoluteMagneticSigmaUT;
           const sigmaMag = Math.hypot(floor, expected.stddevMagnitudeUT || 0);
           const sigmaVertical = Math.hypot(floor, expected.stddevVerticalUT || 0);
+          const sigmaHorizontal = Math.hypot(floor, expected.stddevHorizontalUT || 0);
           const rm = (sample.mag - expected.meanMagnitudeUT) / sigmaMag;
           const rv = (sample.bv - expected.meanVerticalUT) / sigmaVertical;
-          p.w *= Math.exp(-0.5 * (rm * rm + rv * rv));
+          const rh = (sample.bh - expected.meanHorizontalUT) / sigmaHorizontal;
+          p.w *= Math.exp(-0.5 * (rm * rm + rv * rv + rh * rh));
         }
         if ((this.mode === 'delta' || this.mode === 'combo') && previous) {
           const prevCell = nearestCell(this.cells, { x: p.px, y: p.py });
           if (!prevCell) continue;
+          if (![expected.meanMagnitudeUT, expected.meanVerticalUT, expected.meanHorizontalUT, prevCell.meanMagnitudeUT, prevCell.meanVerticalUT, prevCell.meanHorizontalUT].every(Number.isFinite)) continue;
           const dm = sample.mag - previous.mag;
           const dv = sample.bv - previous.bv;
+          const dh = sample.bh - previous.bh;
           const em = expected.meanMagnitudeUT - prevCell.meanMagnitudeUT;
           const ev = expected.meanVerticalUT - prevCell.meanVerticalUT;
+          const eh = expected.meanHorizontalUT - prevCell.meanHorizontalUT;
           const v = PARAMS.deltaMagneticSigmaUT ** 2;
-          p.w *= Math.exp(-0.5 * (((dm - em) ** 2 + (dv - ev) ** 2) / v));
+          const normalizedResidual = Math.sqrt(((dm - em) ** 2 + (dv - ev) ** 2 + (dh - eh) ** 2) / (3 * v));
+          p.w *= 1 / Math.max(PARAMS.deltaReciprocalResidualFloor, normalizedResidual);
         }
       }
     }
@@ -241,7 +252,10 @@ function main() {
     while (dh > Math.PI) dh -= 2 * Math.PI;
     while (dh < -Math.PI) dh += 2 * Math.PI;
     filter.predict(dh);
-    const change = Math.hypot(s.mag - lastFeature.mag, s.bv - lastFeature.bv);
+    const dm = s.mag - lastFeature.mag;
+    const dv = s.bv - lastFeature.bv;
+    const dh = s.bh - lastFeature.bh;
+    const change = Math.sqrt(dm * dm + dv * dv + dh * dh);
     filter.observe({ ...s, change }, lastFeature);
     const e = filter.estimate();
     errors.push(Math.hypot(e.x - s.x, e.y - s.y));

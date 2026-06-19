@@ -28,10 +28,15 @@ enum ParticleFilter2DParams {
     static let absoluteMagneticSigmaUT = 5.0
     static let deltaMagneticSigmaUT = 3.0
     static let comboAbsoluteMagneticSigmaUT = 8.0
+    static let deltaReciprocalResidualFloor = 0.25
     static let surveyedCellNoPenaltyDistanceMeters = 0.75
     static let surveyedCellDistanceSigmaMeters = 0.75
     static let surveyedCellPenaltyFloor = 0.02
     static let resampleNeffFraction = 0.5
+    static let turnRecoveryThresholdRadians = 35.0 * Double.pi / 180.0
+    static let turnRecoveryMaxParticleFraction = 0.18
+    static let turnRecoveryPositionJitterMeters = 0.45
+    static let turnRecoveryHeadingSigmaRadians = 35.0 * Double.pi / 180.0
 }
 
 enum ParticleObservationMode2D: String, CaseIterable, Identifiable {
@@ -61,6 +66,8 @@ final class ParticleFilter2D {
     let map: VenueMap2D
     let heatmapCells: [MagneticHeatmapCell]
     private var rng: SeededRandomNumberGenerator
+    private(set) var lastTurnYawRadians = 0.0
+    private(set) var lastTurnRecoveryParticleCount = 0
 
     init(map: VenueMap2D, heatmapCells: [MagneticHeatmapCell], start: MapPoint2D, seed: UInt64 = 0x5eed) {
         self.map = map
@@ -92,9 +99,14 @@ final class ParticleFilter2D {
     }
 
     func predictStep(gyroDeltaRadians: Double) {
+        lastTurnYawRadians = gyroDeltaRadians
+        lastTurnRecoveryParticleCount = 0
+        let previousEstimate = estimate.point
+        let previousHeading = weightedMeanHeading()
+        let headingSigma = predictionHeadingSigma(for: gyroDeltaRadians)
         for i in particles.indices {
             let old = particles[i]
-            let heading = old.headingRadians + gyroDeltaRadians + rng.normal(mean: 0, sigma: ParticleFilter2DParams.headingSigmaRadians)
+            let heading = old.headingRadians + gyroDeltaRadians + rng.normal(mean: 0, sigma: headingSigma)
             let step = max(0.2, rng.normal(mean: ParticleFilter2DParams.stepLengthMeters, sigma: ParticleFilter2DParams.stepLengthSigmaMeters))
             let nx = old.x + step * cos(heading)
             let ny = old.y + step * sin(heading)
@@ -103,6 +115,7 @@ final class ParticleFilter2D {
             if crossesWall(from: MapPoint2D(x: old.x, y: old.y), to: MapPoint2D(x: nx, y: ny)) { weight *= ParticleFilter2DParams.wallPenalty }
             particles[i] = Particle2D(x: nx, y: ny, headingRadians: heading, weight: weight, previousX: old.x, previousY: old.y)
         }
+        injectTurnRecoveryParticles(from: previousEstimate, previousHeading: previousHeading, gyroDeltaRadians: gyroDeltaRadians)
         applySurveyedCellPrior()
         normalize()
         if effectiveParticleCount < Double(particles.count) * ParticleFilter2DParams.resampleNeffFraction { resample() }
@@ -135,24 +148,30 @@ final class ParticleFilter2D {
             return
         case .legacyChange:
             guard let previous else { return }
-            observe(magneticChangeUT: hypot(feature.magnitudeUT - previous.magnitudeUT, feature.verticalUT - previous.verticalUT))
+            let dm = feature.magnitudeUT - previous.magnitudeUT
+            let dv = feature.verticalUT - previous.verticalUT
+            let dh = feature.horizontalUT - previous.horizontalUT
+            observe(magneticChangeUT: sqrt(dm * dm + dv * dv + dh * dh))
         }
     }
 
     private func observeAbsolute(magnetic feature: MagneticFeature2D, sigma floorSigma: Double, shouldNormalize: Bool = true) {
-        guard heatmapCells.contains(where: { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil }) else { return }
+        guard heatmapCells.contains(where: hasRuntimeFingerprint) else { return }
         for i in particles.indices {
             guard let cell = nearestCell(to: MapPoint2D(x: particles[i].x, y: particles[i].y)),
                   let expectedMagnitude = cell.meanMagnitudeUT,
-                  let expectedVertical = cell.meanVerticalUT else {
+                  let expectedVertical = cell.meanVerticalUT,
+                  let expectedHorizontal = cell.meanHorizontalUT else {
                 particles[i].weight *= ParticleFilter2DParams.surveyedCellPenaltyFloor
                 continue
             }
             let sigmaMagnitude = magneticSigma(for: cell.stddevMagnitudeUT, floor: floorSigma)
             let sigmaVertical = magneticSigma(for: cell.stddevVerticalUT, floor: floorSigma)
+            let sigmaHorizontal = magneticSigma(for: cell.stddevHorizontalUT, floor: floorSigma)
             let magnitudeResidual = (feature.magnitudeUT - expectedMagnitude) / sigmaMagnitude
             let verticalResidual = (feature.verticalUT - expectedVertical) / sigmaVertical
-            particles[i].weight *= exp(-0.5 * (magnitudeResidual * magnitudeResidual + verticalResidual * verticalResidual))
+            let horizontalResidual = (feature.horizontalUT - expectedHorizontal) / sigmaHorizontal
+            particles[i].weight *= exp(-0.5 * (magnitudeResidual * magnitudeResidual + verticalResidual * verticalResidual + horizontalResidual * horizontalResidual))
         }
         guard shouldNormalize else { return }
         normalize()
@@ -160,9 +179,10 @@ final class ParticleFilter2D {
     }
 
     private func observeDelta(current: MagneticFeature2D, previous: MagneticFeature2D, shouldNormalize: Bool = true) {
-        guard heatmapCells.contains(where: { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil }) else { return }
+        guard heatmapCells.contains(where: hasRuntimeFingerprint) else { return }
         let observedMagnitudeDelta = current.magnitudeUT - previous.magnitudeUT
         let observedVerticalDelta = current.verticalUT - previous.verticalUT
+        let observedHorizontalDelta = current.horizontalUT - previous.horizontalUT
         let sigma2 = ParticleFilter2DParams.deltaMagneticSigmaUT * ParticleFilter2DParams.deltaMagneticSigmaUT
         for i in particles.indices {
             guard let previousX = particles[i].previousX,
@@ -171,14 +191,18 @@ final class ParticleFilter2D {
                   let currentCell = nearestCell(to: MapPoint2D(x: particles[i].x, y: particles[i].y)),
                   let previousMagnitude = previousCell.meanMagnitudeUT,
                   let previousVertical = previousCell.meanVerticalUT,
+                  let previousHorizontal = previousCell.meanHorizontalUT,
                   let currentMagnitude = currentCell.meanMagnitudeUT,
-                  let currentVertical = currentCell.meanVerticalUT else {
+                  let currentVertical = currentCell.meanVerticalUT,
+                  let currentHorizontal = currentCell.meanHorizontalUT else {
                 particles[i].weight *= ParticleFilter2DParams.surveyedCellPenaltyFloor
                 continue
             }
             let residualMagnitude = observedMagnitudeDelta - (currentMagnitude - previousMagnitude)
             let residualVertical = observedVerticalDelta - (currentVertical - previousVertical)
-            particles[i].weight *= exp(-0.5 * (residualMagnitude * residualMagnitude + residualVertical * residualVertical) / sigma2)
+            let residualHorizontal = observedHorizontalDelta - (currentHorizontal - previousHorizontal)
+            let normalizedResidual = sqrt((residualMagnitude * residualMagnitude + residualVertical * residualVertical + residualHorizontal * residualHorizontal) / (3 * sigma2))
+            particles[i].weight *= 1.0 / max(ParticleFilter2DParams.deltaReciprocalResidualFloor, normalizedResidual)
         }
         guard shouldNormalize else { return }
         normalize()
@@ -192,13 +216,14 @@ final class ParticleFilter2D {
     func expectedMagneticFeature(at point: MapPoint2D) -> MagneticFeature2D? {
         guard let cell = nearestCell(to: point),
               let magnitude = cell.meanMagnitudeUT,
-              let vertical = cell.meanVerticalUT else { return nil }
-        return MagneticFeature2D(magnitudeUT: magnitude, verticalUT: vertical, accuracyRawValue: 0)
+              let vertical = cell.meanVerticalUT,
+              let horizontal = cell.meanHorizontalUT else { return nil }
+        return MagneticFeature2D(magnitudeUT: magnitude, verticalUT: vertical, horizontalUT: horizontal, accuracyRawValue: 0)
     }
 
     func nearestHeatmapCellDistanceMeters(to point: MapPoint2D) -> Double? {
         guard let cell = nearestCell(to: point) else { return nil }
-        return sqrt(distanceSquared(cell.center, point))
+        return sqrt(distanceSquared(cell.center, point)) + max(0, cell.supportDistanceMeters ?? 0)
     }
 
     var estimate: ParticleEstimate2D {
@@ -233,6 +258,62 @@ final class ParticleFilter2D {
             return
         }
         for i in particles.indices { particles[i].weight /= sum }
+    }
+
+    private func hasRuntimeFingerprint(_ cell: MagneticHeatmapCell) -> Bool {
+        cell.meanMagnitudeUT != nil && cell.meanVerticalUT != nil && cell.meanHorizontalUT != nil
+    }
+
+    private func predictionHeadingSigma(for gyroDeltaRadians: Double) -> Double {
+        guard abs(gyroDeltaRadians) >= ParticleFilter2DParams.turnRecoveryThresholdRadians else {
+            return ParticleFilter2DParams.headingSigmaRadians
+        }
+        return min(
+            ParticleFilter2DParams.turnRecoveryHeadingSigmaRadians,
+            ParticleFilter2DParams.headingSigmaRadians + 0.45 * abs(gyroDeltaRadians)
+        )
+    }
+
+    private func injectTurnRecoveryParticles(from previousEstimate: MapPoint2D, previousHeading: Double, gyroDeltaRadians: Double) {
+        let turnAmount = abs(gyroDeltaRadians)
+        guard turnAmount >= ParticleFilter2DParams.turnRecoveryThresholdRadians, !particles.isEmpty else { return }
+        let fraction = min(
+            ParticleFilter2DParams.turnRecoveryMaxParticleFraction,
+            0.05 + 0.18 * turnAmount / Double.pi
+        )
+        let count = max(1, Int((Double(particles.count) * fraction).rounded()))
+        let replacementIndices = particles.indices.sorted { particles[$0].weight < particles[$1].weight }.prefix(count)
+        var injected = 0
+        for index in replacementIndices {
+            let turnProgress = 0.35 + 0.9 * rng.nextUnit()
+            let heading = previousHeading + gyroDeltaRadians * turnProgress + rng.normal(mean: 0, sigma: ParticleFilter2DParams.turnRecoveryHeadingSigmaRadians)
+            let step = max(0.2, rng.normal(mean: ParticleFilter2DParams.stepLengthMeters, sigma: ParticleFilter2DParams.stepLengthSigmaMeters))
+            let lateral = rng.normal(mean: 0, sigma: ParticleFilter2DParams.turnRecoveryPositionJitterMeters)
+            let point = MapPoint2D(
+                x: previousEstimate.x + step * cos(heading) - lateral * sin(heading),
+                y: previousEstimate.y + step * sin(heading) + lateral * cos(heading)
+            )
+            var weight = 1.0 / Double(particles.count)
+            if !isWalkable(point) { weight *= ParticleFilter2DParams.outsidePenalty }
+            if crossesWall(from: previousEstimate, to: point) { weight *= ParticleFilter2DParams.wallPenalty }
+            particles[index] = Particle2D(
+                x: point.x,
+                y: point.y,
+                headingRadians: heading,
+                weight: weight,
+                previousX: previousEstimate.x,
+                previousY: previousEstimate.y
+            )
+            injected += 1
+        }
+        lastTurnRecoveryParticleCount = injected
+    }
+
+    private func weightedMeanHeading() -> Double {
+        let x = particles.reduce(0) { $0 + cos($1.headingRadians) * $1.weight }
+        let y = particles.reduce(0) { $0 + sin($1.headingRadians) * $1.weight }
+        guard x != 0 || y != 0 else { return 0 }
+        return atan2(y, x)
     }
 
     private func resample() {

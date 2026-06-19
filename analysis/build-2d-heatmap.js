@@ -13,6 +13,8 @@ const path = require('path');
 
 const DEFAULT_CELL_SIZE_M = 0.5;
 const DEFAULT_PASS_SEPARATION_S = 8;
+const DEFAULT_INTERPOLATION_RADIUS_M = 1.0;
+const DEFAULT_INTERPOLATION_SIGMA_M = 0.65;
 
 function usage(exitCode = 1) {
   const msg = [
@@ -63,20 +65,28 @@ function readSamples(filePath) {
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
     if (obj.type !== 'sample2d' || !obj.map || !obj.mag) continue;
+    const magnitudeUT = Number(obj.mag.magnitudeUT);
+    const verticalUT = Number(obj.mag.verticalUT);
+    const horizontalRaw = Number(obj.mag.horizontalUT);
     const sample = {
       source: path.basename(filePath),
       t: Number(obj.t),
       x: Number(obj.map.x),
       y: Number(obj.map.y),
-      magnitudeUT: Number(obj.mag.magnitudeUT),
-      verticalUT: Number(obj.mag.verticalUT),
+      magnitudeUT,
+      verticalUT,
+      horizontalUT: Number.isFinite(horizontalRaw) ? horizontalRaw : horizontalFromMagnitudeVertical(magnitudeUT, verticalUT),
       roomId: obj.roomId ? String(obj.roomId) : null,
     };
-    if ([sample.t, sample.x, sample.y, sample.magnitudeUT, sample.verticalUT].every(Number.isFinite)) {
+    if ([sample.t, sample.x, sample.y, sample.magnitudeUT, sample.verticalUT, sample.horizontalUT].every(Number.isFinite)) {
       samples.push(sample);
     }
   }
   return samples;
+}
+
+function horizontalFromMagnitudeVertical(magnitudeUT, verticalUT) {
+  return Math.sqrt(Math.max(0, magnitudeUT * magnitudeUT - verticalUT * verticalUT));
 }
 
 function pointInPolygon(point, polygon) {
@@ -143,36 +153,109 @@ function buildCells(map, samples, cellSize) {
     buckets.get(key).samples.push(sample);
   }
 
-  const cells = [];
+  const rawStatsByKey = new Map();
+  for (const [key, bucket] of buckets.entries()) {
+    rawStatsByKey.set(key, rawCellStats(bucket));
+  }
+
+  const radiusCells = Math.max(0, Math.ceil(DEFAULT_INTERPOLATION_RADIUS_M / cellSize));
+  const candidates = new Map();
   for (const bucket of buckets.values()) {
-    const sorted = bucket.samples.slice().sort((a, b) => a.t - b.t);
-    const sources = new Set(sorted.map((s) => s.source));
-    const deltas = [];
-    for (let i = 1; i < sorted.length; i++) {
-      if (sorted[i].source !== sorted[i - 1].source) continue;
-      const dm = sorted[i].magnitudeUT - sorted[i - 1].magnitudeUT;
-      const dv = sorted[i].verticalUT - sorted[i - 1].verticalUT;
-      deltas.push(Math.hypot(dm, dv));
+    for (let dx = -radiusCells; dx <= radiusCells; dx++) {
+      for (let dy = -radiusCells; dy <= radiusCells; dy++) {
+        const ix = bucket.ix + dx;
+        const iy = bucket.iy + dy;
+        const center = cellCenter(ix, iy, cellSize);
+        if (!isWalkable(map, center)) continue;
+        candidates.set(`${ix},${iy}`, { ix, iy, center });
+      }
     }
-    const magnitudes = sorted.map((s) => s.magnitudeUT);
-    const verticals = sorted.map((s) => s.verticalUT);
+  }
+
+  const cells = [];
+  for (const candidate of candidates.values()) {
+    const neighbors = [];
+    let supportDistance = Infinity;
+    for (let dx = -radiusCells; dx <= radiusCells; dx++) {
+      for (let dy = -radiusCells; dy <= radiusCells; dy++) {
+        const ix = candidate.ix + dx;
+        const iy = candidate.iy + dy;
+        const stats = rawStatsByKey.get(`${ix},${iy}`);
+        if (!stats) continue;
+        const center = cellCenter(ix, iy, cellSize);
+        const distance = Math.hypot(candidate.center.x - center.x, candidate.center.y - center.y);
+        if (distance > DEFAULT_INTERPOLATION_RADIUS_M + 1e-9) continue;
+        supportDistance = Math.min(supportDistance, distance);
+        const z = distance / Math.max(DEFAULT_INTERPOLATION_SIGMA_M, 1e-6);
+        neighbors.push({ stats, weight: Math.exp(-0.5 * z * z) });
+      }
+    }
+    const weightSum = neighbors.reduce((sum, n) => sum + n.weight, 0);
+    if (!(weightSum > 0) || !Number.isFinite(supportDistance)) continue;
+    const meanMagnitudeUT = weightedMean(neighbors, 'meanMagnitudeUT', weightSum);
+    const meanVerticalUT = weightedMean(neighbors, 'meanVerticalUT', weightSum);
+    const meanHorizontalUT = weightedMean(neighbors, 'meanHorizontalUT', weightSum);
+    const rawStats = rawStatsByKey.get(`${candidate.ix},${candidate.iy}`);
     cells.push({
-      center: {
-        x: round((bucket.ix + 0.5) * cellSize, 3),
-        y: round((bucket.iy + 0.5) * cellSize, 3),
-      },
+      center: { x: round(candidate.center.x, 3), y: round(candidate.center.y, 3) },
       cellSizeMeters: cellSize,
-      sampleCount: sorted.length,
-      passCount: sources.size,
-      magneticChangeUT: round(percentile(deltas, 0.75), 4),
-      meanMagnitudeUT: round(mean(magnitudes), 4),
-      stddevMagnitudeUT: round(stddev(magnitudes), 4),
-      meanVerticalUT: round(mean(verticals), 4),
-      stddevVerticalUT: round(stddev(verticals), 4),
+      sampleCount: rawStats ? rawStats.sampleCount : 0,
+      passCount: rawStats ? rawStats.passCount : 0,
+      magneticChangeUT: round(weightedMean(neighbors, 'magneticChangeUT', weightSum), 4),
+      meanMagnitudeUT: round(meanMagnitudeUT, 4),
+      stddevMagnitudeUT: round(weightedStddev(neighbors, 'meanMagnitudeUT', 'stddevMagnitudeUT', meanMagnitudeUT, weightSum), 4),
+      meanVerticalUT: round(meanVerticalUT, 4),
+      stddevVerticalUT: round(weightedStddev(neighbors, 'meanVerticalUT', 'stddevVerticalUT', meanVerticalUT, weightSum), 4),
+      meanHorizontalUT: round(meanHorizontalUT, 4),
+      stddevHorizontalUT: round(weightedStddev(neighbors, 'meanHorizontalUT', 'stddevHorizontalUT', meanHorizontalUT, weightSum), 4),
+      supportDistanceMeters: round(supportDistance, 3),
     });
   }
   cells.sort((a, b) => a.center.y === b.center.y ? a.center.x - b.center.x : a.center.y - b.center.y);
   return cells;
+}
+
+function cellCenter(ix, iy, cellSize) {
+  return { x: (ix + 0.5) * cellSize, y: (iy + 0.5) * cellSize };
+}
+
+function rawCellStats(bucket) {
+  const sorted = bucket.samples.slice().sort((a, b) => a.t - b.t);
+  const sources = new Set(sorted.map((s) => s.source));
+  const deltas = [];
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].source !== sorted[i - 1].source) continue;
+    const dm = sorted[i].magnitudeUT - sorted[i - 1].magnitudeUT;
+    const dv = sorted[i].verticalUT - sorted[i - 1].verticalUT;
+    const dh = sorted[i].horizontalUT - sorted[i - 1].horizontalUT;
+    deltas.push(Math.sqrt(dm * dm + dv * dv + dh * dh));
+  }
+  const magnitudes = sorted.map((s) => s.magnitudeUT);
+  const verticals = sorted.map((s) => s.verticalUT);
+  const horizontals = sorted.map((s) => s.horizontalUT);
+  return {
+    sampleCount: sorted.length,
+    passCount: sources.size,
+    magneticChangeUT: percentile(deltas, 0.75),
+    meanMagnitudeUT: mean(magnitudes),
+    stddevMagnitudeUT: stddev(magnitudes),
+    meanVerticalUT: mean(verticals),
+    stddevVerticalUT: stddev(verticals),
+    meanHorizontalUT: mean(horizontals),
+    stddevHorizontalUT: stddev(horizontals),
+  };
+}
+
+function weightedMean(neighbors, field, weightSum) {
+  return neighbors.reduce((sum, n) => sum + n.stats[field] * n.weight, 0) / weightSum;
+}
+
+function weightedStddev(neighbors, meanField, stddevField, interpolatedMean, weightSum) {
+  const variance = neighbors.reduce((sum, n) => {
+    const spread = n.stats[meanField] - interpolatedMean;
+    return sum + n.weight * (n.stats[stddevField] ** 2 + spread * spread);
+  }, 0) / weightSum;
+  return Math.sqrt(Math.max(0, variance));
 }
 
 function main() {

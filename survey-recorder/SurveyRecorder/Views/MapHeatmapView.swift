@@ -30,7 +30,7 @@ struct MapHeatmapView: View {
         return bundle.heatmapCells
     }
     private var cellsHaveRuntimeFingerprint: Bool {
-        cells.contains { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil }
+        cells.contains { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil && $0.meanHorizontalUT != nil }
     }
 
     var body: some View {
@@ -160,18 +160,10 @@ struct MapHeatmapView: View {
             let counts = cells.map(\.sampleCount)
             guard let lo = counts.min(), let hi = counts.max(), hi > 0 else { return nil }
             return "\(lo)–\(hi) samples/cell"
-        case .magneticFieldChange:
-            let changes = cells.map(\.magneticChangeUT)
-            guard let lo = changes.min(), let hi = changes.max(), hi > 0 else { return nil }
-            return String(format: "%.2f–%.2f µT texture", lo, hi)
         case .magneticMeanMagnitude:
             let values = cells.compactMap(\.meanMagnitudeUT)
             guard let lo = values.min(), let hi = values.max(), !values.isEmpty else { return nil }
             return String(format: "%.1f–%.1f µT mean magnitude", lo, hi)
-        case .magneticMeanVertical:
-            let values = cells.compactMap(\.meanVerticalUT)
-            guard let lo = values.min(), let hi = values.max(), !values.isEmpty else { return nil }
-            return String(format: "%.1f–%.1f µT mean vertical", lo, hi)
         }
     }
 
@@ -181,8 +173,7 @@ struct MapHeatmapView: View {
                 Text("Mode semantics")
                     .font(.headline)
                 Label("Survey strength combines sample count and repeated passes per cell.", systemImage: "checkmark.circle")
-                Label("Magnetic change visualizes local field texture, not absolute field strength.", systemImage: "waveform.path.ecg")
-                Label("Mag/Vert average show the mean magnetic magnitude and vertical component the runtime matches against.", systemImage: "chart.bar.xaxis")
+                Label("Mag avg shows the mean magnetic-field magnitude the runtime matches against.", systemImage: "chart.bar.xaxis")
                 Label("Rooms are first-class geometry so the runtime can report room confidence, not only x/y.", systemImage: "square.split.2x2")
                 Label("Walls, entrances, and AR alignment points now come from venue-map JSON.", systemImage: "point.3.connected.trianglepath.dotted")
             }
@@ -225,6 +216,7 @@ struct MapHeatmapView: View {
                         stat("Position", controller.latestMapPoint.map { String(format: "%.1f, %.1f", $0.x, $0.y) } ?? "-")
                         stat("Mag", controller.latestMagneticFeature.map { String(format: "%.1fµT", $0.magnitudeUT) } ?? "-")
                         stat("Vertical", controller.latestMagneticFeature.map { String(format: "%.1fµT", $0.verticalUT) } ?? "-")
+                        stat("Horizontal", controller.latestMagneticFeature.map { String(format: "%.1fµT", $0.horizontalUT) } ?? "-")
                         stat("Rejected", "\(controller.rejectedOutsideWalkableCount)")
                     }
 
@@ -286,6 +278,8 @@ struct MapHeatmapView: View {
                     HStack(spacing: 14) {
                         stat("Obs Vert", controller.observedVerticalUT.map { String(format: "%.1fµT", $0) } ?? "-")
                         stat("Exp Vert", controller.expectedVerticalUT.map { String(format: "%.1fµT", $0) } ?? "-")
+                        stat("Obs Horiz", controller.observedHorizontalUT.map { String(format: "%.1fµT", $0) } ?? "-")
+                        stat("Exp Horiz", controller.expectedHorizontalUT.map { String(format: "%.1fµT", $0) } ?? "-")
                     }
                     HStack(spacing: 14) {
                         stat("Neff", controller.estimate.map { String(format: "%.0f", $0.effectiveParticleCount) } ?? "-")
@@ -293,6 +287,8 @@ struct MapHeatmapView: View {
                         stat("Far particles", controller.farParticlePercent.map { String(format: "%.0f%%", $0) } ?? "-")
                     }
                     HStack(spacing: 14) {
+                        stat("Yaw", controller.lastStepYawDeltaDegrees.map { String(format: "%.0f°", $0) } ?? "-")
+                        stat("Turn inject", "\(controller.turnRecoveryParticleCount)")
                         stat("Particles", "\(controller.particleSnapshot.count)")
                     }
                 } else if map.entrances.isEmpty || cells.isEmpty || !cellsHaveRuntimeFingerprint {
@@ -369,7 +365,7 @@ struct MapHeatmapView: View {
     private var runtimeUnavailableText: String {
         if map.entrances.isEmpty { return "Add an entrance before runtime tracking." }
         if cells.isEmpty { return "Generate/import heatmap cells before runtime tracking." }
-        return "Heatmap cells need magnetic means. Resurvey in-app or rebuild/import with build-2d-heatmap."
+        return "Heatmap cells need magnitude, vertical, and horizontal means. Resurvey in-app or rebuild/import with build-2d-heatmap."
     }
 
     private func alignmentButtonTitle(_ controller: TwoDSurveyController) -> String {
@@ -544,9 +540,7 @@ struct FloorPlanHeatmapCanvas: View {
         }
 
         let maxSamples = max(cells.map(\.sampleCount).max() ?? 1, 1)
-        let maxChange = max(cells.map(\.magneticChangeUT).max() ?? 0, 0)
         let magnitudeRange = valueRange(cells.compactMap(\.meanMagnitudeUT))
-        let verticalRange = valueRange(cells.compactMap(\.meanVerticalUT))
 
         for cell in cells {
             guard Geometry2D.isWalkable(cell.center, in: map) else { continue }
@@ -558,13 +552,8 @@ struct FloorPlanHeatmapCanvas: View {
                 let passScore = min(1, Double(cell.passCount) / 4.0)
                 let score = 0.65 * sampleScore + 0.35 * passScore
                 color = surveyStrengthColor(score)
-            case .magneticFieldChange:
-                let score = maxChange > 0 ? min(1, cell.magneticChangeUT / maxChange) : 0
-                color = magneticChangeColor(score)
             case .magneticMeanMagnitude:
                 color = averageColor(cell.meanMagnitudeUT, in: magnitudeRange)
-            case .magneticMeanVertical:
-                color = averageColor(cell.meanVerticalUT, in: verticalRange)
             }
             let cellPath = Path(roundedRect: rect, cornerRadius: 2)
             context.fill(cellPath, with: .color(color))
@@ -727,14 +716,6 @@ struct FloorPlanHeatmapCanvas: View {
         if score < 0.5 { return Color.orange.opacity(0.82) }
         if score < 0.75 { return Color.yellow.opacity(0.85) }
         return Color.green.opacity(0.9)
-    }
-
-    // Magnetic-texture ramp: blue = flat/weak, red = strong texture (best for the filter).
-    private func magneticChangeColor(_ score: Double) -> Color {
-        if score < 0.2 { return Color.blue.opacity(0.7) }
-        if score < 0.45 { return Color.cyan.opacity(0.8) }
-        if score < 0.7 { return Color.orange.opacity(0.85) }
-        return Color.red.opacity(0.9)
     }
 
     // Absolute-field-average ramp: blue = low, red = high, normalized across the

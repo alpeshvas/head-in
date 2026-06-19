@@ -17,12 +17,16 @@ final class TwoDRuntimeController {
     private(set) var particleSnapshot: [MapPoint2D] = []
     private(set) var observedMagnitudeUT: Double?
     private(set) var observedVerticalUT: Double?
+    private(set) var observedHorizontalUT: Double?
     private(set) var expectedMagnitudeUT: Double?
     private(set) var expectedVerticalUT: Double?
+    private(set) var expectedHorizontalUT: Double?
     private(set) var magneticResidualUT: Double?
     private(set) var nearestHeatmapCellDistanceMeters: Double?
     private(set) var meanParticleCellDistanceMeters: Double?
     private(set) var farParticlePercent: Double?
+    private(set) var lastStepYawDeltaDegrees: Double?
+    private(set) var turnRecoveryParticleCount = 0
 
     @ObservationIgnored private let sensorRecorder = SensorRecorder()
     @ObservationIgnored private var stepDetector = StepDetector2D()
@@ -43,8 +47,8 @@ final class TwoDRuntimeController {
             statusText = "No magnetic heatmap cells"
             return
         }
-        guard heatmapCells.contains(where: { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil }) else {
-            statusText = "Heatmap needs magnetic means · resurvey or rebuild"
+        guard heatmapCells.contains(where: { $0.meanMagnitudeUT != nil && $0.meanVerticalUT != nil && $0.meanHorizontalUT != nil }) else {
+            statusText = "Heatmap needs horizontal magnetic means · resurvey or rebuild"
             return
         }
         filter = ParticleFilter2D(map: map, heatmapCells: heatmapCells, start: entrance.point)
@@ -54,12 +58,16 @@ final class TwoDRuntimeController {
         particleSnapshot = []
         observedMagnitudeUT = nil
         observedVerticalUT = nil
+        observedHorizontalUT = nil
         expectedMagnitudeUT = nil
         expectedVerticalUT = nil
+        expectedHorizontalUT = nil
         magneticResidualUT = nil
         nearestHeatmapCellDistanceMeters = nil
         meanParticleCellDistanceMeters = nil
         farParticlePercent = nil
+        lastStepYawDeltaDegrees = nil
+        turnRecoveryParticleCount = 0
         pendingYawDelta = 0
         previousMotionTimestamp = nil
         lastStepFeature = nil
@@ -108,7 +116,10 @@ final class TwoDRuntimeController {
 
         guard stepDetector.addSample(t: timestamp, magnitude: uaMagnitude) else { return }
         detectedSteps += 1
-        filter.predictStep(gyroDeltaRadians: pendingYawDelta)
+        let stepYawDelta = pendingYawDelta
+        filter.predictStep(gyroDeltaRadians: stepYawDelta)
+        lastStepYawDeltaDegrees = stepYawDelta * 180 / .pi
+        turnRecoveryParticleCount = filter.lastTurnRecoveryParticleCount
         pendingYawDelta = 0
 
         if let feature, motion.magneticField.accuracy != .uncalibrated {
@@ -116,6 +127,7 @@ final class TwoDRuntimeController {
             if observationMode != .coverageOnly { magneticUpdates += 1 }
             observedMagnitudeUT = feature.magnitudeUT
             observedVerticalUT = feature.verticalUT
+            observedHorizontalUT = feature.horizontalUT
             lastStepFeature = feature
         }
         estimate = filter.estimate
@@ -128,9 +140,13 @@ final class TwoDRuntimeController {
         let expected = filter.expectedMagneticFeature(at: estimate.point)
         expectedMagnitudeUT = expected?.magnitudeUT
         expectedVerticalUT = expected?.verticalUT
+        expectedHorizontalUT = expected?.horizontalUT
         nearestHeatmapCellDistanceMeters = filter.nearestHeatmapCellDistanceMeters(to: estimate.point)
-        if let observedMagnitudeUT, let observedVerticalUT, let expectedMagnitudeUT, let expectedVerticalUT {
-            magneticResidualUT = hypot(observedMagnitudeUT - expectedMagnitudeUT, observedVerticalUT - expectedVerticalUT)
+        if let observedMagnitudeUT, let observedVerticalUT, let observedHorizontalUT, let expectedMagnitudeUT, let expectedVerticalUT, let expectedHorizontalUT {
+            let dm = observedMagnitudeUT - expectedMagnitudeUT
+            let dv = observedVerticalUT - expectedVerticalUT
+            let dh = observedHorizontalUT - expectedHorizontalUT
+            magneticResidualUT = sqrt(dm * dm + dv * dv + dh * dh)
         } else {
             magneticResidualUT = nil
         }

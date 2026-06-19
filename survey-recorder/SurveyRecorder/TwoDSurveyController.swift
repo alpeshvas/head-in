@@ -21,15 +21,18 @@ final class TwoDSurveyController {
 
     @ObservationIgnored private let sensorRecorder = SensorRecorder()
     @ObservationIgnored private let arRecorder = ARPoseRecorder()
-    @ObservationIgnored private let accumulator = HeatmapAccumulator2D(cellSizeMeters: 0.5)
+    @ObservationIgnored private var accumulator = HeatmapAccumulator2D(cellSizeMeters: 0.5)
     @ObservationIgnored private var latestARPoint: ARPoint2D?
-    @ObservationIgnored private var samples: [SurveySample2D] = []
-    @ObservationIgnored private var updateCounter = 0
-    @ObservationIgnored private var lastHeatmapBuildT = -Double.infinity
     @ObservationIgnored private var writer: TwoDSurveyWriter?
+    @ObservationIgnored private var pendingTrackingStatus = "off"
+    @ObservationIgnored private var pendingMapPoint: MapPoint2D?
+    @ObservationIgnored private var pendingRoomName: String?
+    @ObservationIgnored private var pendingMagneticFeature: MagneticFeature2D?
+    @ObservationIgnored private var pendingSampleCount = 0
+    @ObservationIgnored private var pendingRejectedCount = 0
+    @ObservationIgnored private var lastPublishT = -Double.infinity
 
-    private let heatmapRefreshSamples = 12
-    private let heatmapRefreshSeconds = 0.5
+    private let publishIntervalSeconds = 0.3
 
     init(map: VenueMap2D, existingCells: [MagneticHeatmapCell] = []) {
         self.map = map
@@ -53,20 +56,23 @@ final class TwoDSurveyController {
         isRunning = true
         statusText = "Starting AR survey"
         trackingStatus = "starting"
+        pendingTrackingStatus = "starting"
         latestMapPoint = nil
         latestRoomName = nil
         latestMagneticFeature = nil
         sampleCount = 0
         rejectedOutsideWalkableCount = 0
-        samples.removeAll(keepingCapacity: true)
-        // Reset+add: every fresh survey starts from an empty heatmap rather than
-        // building on the previously saved cells.
+        pendingMapPoint = nil
+        pendingRoomName = nil
+        pendingMagneticFeature = nil
+        pendingSampleCount = 0
+        pendingRejectedCount = 0
+        accumulator.reset()
         heatmapCells = []
         alignmentPairs.removeAll(keepingCapacity: true)
         transform = nil
         latestARPoint = nil
-        updateCounter = 0
-        lastHeatmapBuildT = -Double.infinity
+        lastPublishT = -Double.infinity
         writer = try? TwoDSurveyWriter(map: map)
 
         arRecorder.onPose = { [weak self] pose in
@@ -78,6 +84,7 @@ final class TwoDSurveyController {
             Task { @MainActor [weak self] in
                 self?.statusText = reason
                 self?.trackingStatus = "unavailable"
+                self?.pendingTrackingStatus = "unavailable"
                 self?.stop()
             }
         }
@@ -94,7 +101,7 @@ final class TwoDSurveyController {
 
     func stop() {
         guard isRunning else { return }
-        rebuildHeatmap(forceTimestamp: ProcessInfo.processInfo.systemUptime)
+        publishState(timestamp: ProcessInfo.processInfo.systemUptime)
         isRunning = false
         arRecorder.stop()
         sensorRecorder.stop()
@@ -130,13 +137,14 @@ final class TwoDSurveyController {
     }
 
     private func handlePose(_ pose: ARPoseRecorder.Pose) {
-        trackingStatus = pose.tracking
         latestARPoint = ARPoint2D(x: pose.x, z: pose.z)
+        pendingTrackingStatus = pose.tracking
         if let transform {
             let mapPoint = transform.mapPoint(for: ARPoint2D(x: pose.x, z: pose.z))
-            latestMapPoint = mapPoint
-            latestRoomName = roomName(containing: mapPoint)
+            pendingMapPoint = mapPoint
+            pendingRoomName = roomName(containing: mapPoint)
         }
+        touch(timestamp: pose.t)
     }
 
     private func handleMotion(_ motion: CMDeviceMotion) {
@@ -148,16 +156,17 @@ final class TwoDSurveyController {
             gravityVector: Vector3D(x: gravity.x, y: gravity.y, z: gravity.z),
             accuracyRawValue: Int(motion.magneticField.accuracy.rawValue)
         ) else { return }
-        latestMagneticFeature = feature
+        pendingMagneticFeature = feature
 
         let mapPoint = transform.mapPoint(for: ar)
-        latestMapPoint = mapPoint
-        latestRoomName = roomName(containing: mapPoint)
+        pendingMapPoint = mapPoint
+        pendingRoomName = roomName(containing: mapPoint)
         guard Geometry2D.isWalkable(mapPoint, in: map) else {
-            rejectedOutsideWalkableCount += 1
-            if rejectedOutsideWalkableCount.isMultiple(of: 25) {
+            pendingRejectedCount += 1
+            if pendingRejectedCount.isMultiple(of: 25) {
                 statusText = "Outside walkable area · adjust map/alignment"
             }
+            touch(timestamp: motion.timestamp)
             return
         }
 
@@ -168,23 +177,30 @@ final class TwoDSurveyController {
             roomId: Geometry2D.roomId(containing: mapPoint, in: map),
             magnetic: feature
         )
-        samples.append(sample)
+        accumulator.add(sample, in: map)
         writer?.writeSample(sample)
-        sampleCount = samples.count
-        if sampleCount == 1 || statusText.hasPrefix("Outside walkable area") {
+        pendingSampleCount += 1
+        if pendingSampleCount == 1 || statusText.hasPrefix("Outside walkable area") {
             statusText = "Surveying · heatmap forming"
         }
 
-        updateCounter += 1
-        if updateCounter >= heatmapRefreshSamples || motion.timestamp - lastHeatmapBuildT >= heatmapRefreshSeconds {
-            rebuildHeatmap(forceTimestamp: motion.timestamp)
-        }
+        touch(timestamp: motion.timestamp)
     }
 
-    private func rebuildHeatmap(forceTimestamp timestamp: TimeInterval) {
-        heatmapCells = accumulator.buildCells(from: samples, in: map)
-        updateCounter = 0
-        lastHeatmapBuildT = timestamp
+    private func touch(timestamp: TimeInterval) {
+        guard timestamp - lastPublishT >= publishIntervalSeconds else { return }
+        publishState(timestamp: timestamp)
+    }
+
+    private func publishState(timestamp: TimeInterval) {
+        trackingStatus = pendingTrackingStatus
+        latestMapPoint = pendingMapPoint
+        latestRoomName = pendingRoomName
+        latestMagneticFeature = pendingMagneticFeature
+        sampleCount = pendingSampleCount
+        rejectedOutsideWalkableCount = pendingRejectedCount
+        heatmapCells = accumulator.cells(in: map)
+        lastPublishT = timestamp
     }
 
     private func roomName(containing point: MapPoint2D) -> String? {

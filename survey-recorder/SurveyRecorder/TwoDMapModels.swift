@@ -67,22 +67,23 @@ struct MagneticHeatmapCell: Codable, Identifiable, Hashable {
     var stddevMagnitudeUT: Double? = nil
     var meanVerticalUT: Double? = nil
     var stddevVerticalUT: Double? = nil
+    var meanHorizontalUT: Double? = nil
+    var stddevHorizontalUT: Double? = nil
+    /// Distance from this cell center to the nearest real survey bucket. Interpolated
+    /// cells keep this non-zero so runtime priors still know support is weaker.
+    var supportDistanceMeters: Double? = nil
 }
 
 enum HeatmapMode2D: String, CaseIterable, Identifiable {
     case surveyStrength
-    case magneticFieldChange
     case magneticMeanMagnitude
-    case magneticMeanVertical
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .surveyStrength: return "Survey strength"
-        case .magneticFieldChange: return "Magnetic change"
         case .magneticMeanMagnitude: return "Mag avg"
-        case .magneticMeanVertical: return "Vert avg"
         }
     }
 
@@ -90,12 +91,8 @@ enum HeatmapMode2D: String, CaseIterable, Identifiable {
         switch self {
         case .surveyStrength:
             return "Coverage from sample count and repeated passes. Green means this area has enough survey data."
-        case .magneticFieldChange:
-            return "Magnetic texture/gradient strength. Hotter areas should help particles localize faster."
         case .magneticMeanMagnitude:
             return "Average total magnetic-field magnitude per cell (µT). This is the primary fingerprint the runtime matches against."
-        case .magneticMeanVertical:
-            return "Average gravity-aligned vertical magnetic component per cell (µT). Adds a second matching dimension."
         }
     }
 }
@@ -115,7 +112,10 @@ enum VenueMap2DStore {
 
     static func loadSavedOrBundled(resource: String = defaultResource) -> VenueMapBundle2D {
         if let imported = try? load(from: importedMapURL) { return imported }
-        return (try? loadBundled(resource: resource)) ?? demoBundle
+        if let bundled = try? loadBundled(resource: resource), bundled.hasRuntimeFingerprint {
+            return bundled
+        }
+        return demoBundle
     }
 
     static func loadBundled(resource: String) throws -> VenueMapBundle2D {
@@ -169,6 +169,14 @@ enum VenueMap2DStore {
 
     static var demoBundle: VenueMapBundle2D {
         VenueMapBundle2D(schema: 1, map: DemoVenueMap2D.map, heatmapCells: DemoVenueMap2D.cells)
+    }
+}
+
+private extension VenueMapBundle2D {
+    var hasRuntimeFingerprint: Bool {
+        heatmapCells.contains { cell in
+            cell.meanMagnitudeUT != nil && cell.meanVerticalUT != nil && cell.meanHorizontalUT != nil
+        }
     }
 }
 
@@ -258,6 +266,7 @@ enum DemoVenueMap2D {
                 let baseTexture = 0.9 + 0.35 * sin(x * 0.8) + 0.25 * cos(y * 1.1)
                 let meanMagnitude = 49.0 + steelAnomaly - 2.0 * cos(y * 0.6)
                 let meanVertical = -18.0 + steelAnomaly * 0.6 + 6.0 * sin(x * 0.5)
+                let meanHorizontal = sqrt(max(0, meanMagnitude * meanMagnitude - meanVertical * meanVertical))
                 out.append(MagneticHeatmapCell(
                     center: MapPoint2D(x: x, y: y),
                     cellSizeMeters: cellSize,
@@ -265,7 +274,9 @@ enum DemoVenueMap2D {
                     passCount: passCount,
                     magneticChangeUT: max(0, baseTexture + steelAnomaly + doorwayChange),
                     meanMagnitudeUT: meanMagnitude,
-                    meanVerticalUT: meanVertical
+                    meanVerticalUT: meanVertical,
+                    meanHorizontalUT: meanHorizontal,
+                    supportDistanceMeters: 0
                 ))
             }
         }

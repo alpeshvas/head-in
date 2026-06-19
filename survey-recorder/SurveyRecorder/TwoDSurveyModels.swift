@@ -82,13 +82,43 @@ enum ARMapTransformError: LocalizedError {
 struct MagneticFeature2D: Codable, Hashable {
     var magnitudeUT: Double
     var verticalUT: Double
+    var horizontalUT: Double
     var accuracyRawValue: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case magnitudeUT
+        case verticalUT
+        case horizontalUT
+        case accuracyRawValue
+    }
+
+    init(magnitudeUT: Double, verticalUT: Double, horizontalUT: Double, accuracyRawValue: Int) {
+        self.magnitudeUT = magnitudeUT
+        self.verticalUT = verticalUT
+        self.horizontalUT = horizontalUT
+        self.accuracyRawValue = accuracyRawValue
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        magnitudeUT = try container.decode(Double.self, forKey: .magnitudeUT)
+        verticalUT = try container.decode(Double.self, forKey: .verticalUT)
+        horizontalUT = try container.decodeIfPresent(Double.self, forKey: .horizontalUT) ?? sqrt(max(0, magnitudeUT * magnitudeUT - verticalUT * verticalUT))
+        accuracyRawValue = try container.decode(Int.self, forKey: .accuracyRawValue)
+    }
 
     static func from(magneticVector: Vector3D, gravityVector: Vector3D, accuracyRawValue: Int) -> MagneticFeature2D? {
         guard let gravityUnit = gravityVector.unit else { return nil }
+        let vertical = magneticVector.dot(gravityUnit)
+        let horizontalVector = Vector3D(
+            x: magneticVector.x - vertical * gravityUnit.x,
+            y: magneticVector.y - vertical * gravityUnit.y,
+            z: magneticVector.z - vertical * gravityUnit.z
+        )
         return MagneticFeature2D(
             magnitudeUT: magneticVector.magnitude,
-            verticalUT: magneticVector.dot(gravityUnit),
+            verticalUT: vertical,
+            horizontalUT: horizontalVector.magnitude,
             accuracyRawValue: accuracyRawValue
         )
     }
