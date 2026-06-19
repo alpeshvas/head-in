@@ -272,6 +272,7 @@ struct MapHeatmapView: View {
                     HStack(spacing: 14) {
                         stat("Mode", controller.observationMode.title)
                         stat("Steps", "\(controller.detectedSteps)")
+                        stat("Apple steps", "\(controller.applePedometerSteps)")
                         stat("Mag obs", "\(controller.magneticUpdates)")
                     }
                     HStack(spacing: 14) {
@@ -297,6 +298,8 @@ struct MapHeatmapView: View {
                     HStack(spacing: 14) {
                         stat("Yaw", controller.lastStepYawDeltaDegrees.map { String(format: "%.0f°", $0) } ?? "-")
                         stat("Turn inject", "\(controller.turnRecoveryParticleCount)")
+                        stat("Step diff", String(format: "%+d", controller.stepCountDifference))
+                        stat("Rejected peaks", "\(controller.rejectedStepCandidateCount)")
                         stat("Particles", "\(controller.particleSnapshot.count)")
                     }
                 } else if map.entrances.isEmpty || cells.isEmpty || !cellsHaveRuntimeFingerprint {

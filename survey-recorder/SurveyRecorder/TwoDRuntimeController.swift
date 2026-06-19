@@ -27,12 +27,15 @@ final class TwoDRuntimeController {
     private(set) var farParticlePercent: Double?
     private(set) var lastStepYawDeltaDegrees: Double?
     private(set) var turnRecoveryParticleCount = 0
+    private(set) var applePedometerSteps = 0
+    private(set) var stepCountDifference = 0
+    private(set) var rejectedStepCandidateCount = 0
 
     @ObservationIgnored private let sensorRecorder = SensorRecorder()
+    @ObservationIgnored private var stepDetector = StepDetector2D()
     @ObservationIgnored private var filter: ParticleFilter2D?
     @ObservationIgnored private var previousMotionTimestamp: TimeInterval?
     @ObservationIgnored private var pendingYawDelta = 0.0
-    @ObservationIgnored private var lastPedometerStepCount: Int?
     @ObservationIgnored private var latestStepFeature: MagneticFeature2D?
     @ObservationIgnored private var latestStepFeatureIsUsable = false
     @ObservationIgnored private var lastStepFeature: MagneticFeature2D?
@@ -70,12 +73,15 @@ final class TwoDRuntimeController {
         farParticlePercent = nil
         lastStepYawDeltaDegrees = nil
         turnRecoveryParticleCount = 0
+        applePedometerSteps = 0
+        stepCountDifference = 0
+        rejectedStepCandidateCount = 0
         pendingYawDelta = 0
         previousMotionTimestamp = nil
-        lastPedometerStepCount = nil
         latestStepFeature = nil
         latestStepFeatureIsUsable = false
         lastStepFeature = nil
+        stepDetector.reset()
         if let filter { updateRuntimeDiagnostics(filter: filter) }
         isRunning = true
         statusText = "Tracking from \(entrance.name)"
@@ -101,8 +107,10 @@ final class TwoDRuntimeController {
     }
 
     private func handleMotion(_ motion: CMDeviceMotion) {
-        guard isRunning else { return }
+        guard isRunning, let filter else { return }
         let timestamp = motion.timestamp
+        let ua = motion.userAcceleration
+        let uaMagnitude = hypot3(ua.x, ua.y, ua.z)
 
         let rotation = motion.rotationRate
         let gravity = motion.gravity
@@ -122,25 +130,30 @@ final class TwoDRuntimeController {
         )
         latestStepFeature = feature
         latestStepFeatureIsUsable = feature != nil && motion.magneticField.accuracy != .uncalibrated
+
+        switch stepDetector.addSample(t: timestamp, magnitude: uaMagnitude) {
+        case .accepted:
+            acceptStep(filter: filter)
+        case .rejected:
+            rejectedStepCandidateCount += 1
+        case .candidate, .none:
+            break
+        }
     }
 
     private func handlePedometer(_ data: CMPedometerData) {
-        guard isRunning, let filter else { return }
-        let stepCount = data.numberOfSteps.intValue
-        let previousCount = lastPedometerStepCount ?? 0
-        lastPedometerStepCount = stepCount
-        let stepDelta = stepCount - previousCount
-        guard stepDelta > 0 else { return }
+        guard isRunning else { return }
+        applePedometerSteps = max(0, data.numberOfSteps.intValue)
+        updateStepDifference()
+    }
 
-        detectedSteps += stepDelta
-        let yawPerStep = pendingYawDelta / Double(stepDelta)
-        var injectedCount = 0
-        for _ in 0..<stepDelta {
-            filter.predictStep(gyroDeltaRadians: yawPerStep)
-            injectedCount += filter.lastTurnRecoveryParticleCount
-        }
-        lastStepYawDeltaDegrees = yawPerStep * 180 / .pi
-        turnRecoveryParticleCount = injectedCount
+    private func acceptStep(filter: ParticleFilter2D) {
+        detectedSteps += 1
+        updateStepDifference()
+        let stepYawDelta = pendingYawDelta
+        filter.predictStep(gyroDeltaRadians: stepYawDelta)
+        lastStepYawDeltaDegrees = stepYawDelta * 180 / .pi
+        turnRecoveryParticleCount = filter.lastTurnRecoveryParticleCount
         pendingYawDelta = 0
 
         if let feature = latestStepFeature, latestStepFeatureIsUsable {
@@ -154,6 +167,10 @@ final class TwoDRuntimeController {
         estimate = filter.estimate
         updateRuntimeDiagnostics(filter: filter)
         updateStatus()
+    }
+
+    private func updateStepDifference() {
+        stepCountDifference = applePedometerSteps - detectedSteps
     }
 
     private func updateRuntimeDiagnostics(filter: ParticleFilter2D) {
@@ -202,6 +219,85 @@ final class TwoDRuntimeController {
     }
 }
 
+private enum StepDetector2DResult {
+    case none
+    case candidate
+    case accepted
+    case rejected
+}
+
+private struct StepDetector2D {
+    private struct TimedValue {
+        let t: TimeInterval
+        let value: Double
+    }
+
+    private static let minStepIntervalSeconds = 0.42
+    private static let maxStepIntervalSeconds = 1.45
+
+    private var raw: [TimedValue] = []
+    private var smoothed: [TimedValue] = []
+    private var lastAcceptedStepTime = -Double.infinity
+    private var pendingPeakTime: TimeInterval?
+
+    mutating func reset() {
+        raw.removeAll(keepingCapacity: true)
+        smoothed.removeAll(keepingCapacity: true)
+        lastAcceptedStepTime = -Double.infinity
+        pendingPeakTime = nil
+    }
+
+    mutating func addSample(t: TimeInterval, magnitude: Double) -> StepDetector2DResult {
+        guard magnitude.isFinite else { return .none }
+        raw.append(TimedValue(t: t, value: magnitude))
+        if raw.count > 9 { raw.removeFirst(raw.count - 9) }
+        let smoothValue = raw.suffix(7).reduce(0) { $0 + $1.value } / Double(min(raw.count, 7))
+        smoothed.append(TimedValue(t: t, value: smoothValue))
+        if smoothed.count > 160 { smoothed.removeFirst(smoothed.count - 160) }
+        guard smoothed.count >= 5 else { return .none }
+
+        if let pendingPeakTime, t - pendingPeakTime > Self.maxStepIntervalSeconds {
+            self.pendingPeakTime = nil
+            return .rejected
+        }
+
+        let candidateIndex = smoothed.count - 2
+        let previous = smoothed[candidateIndex - 1]
+        let candidate = smoothed[candidateIndex]
+        let next = smoothed[candidateIndex + 1]
+        let recentValues = smoothed.suffix(min(120, smoothed.count)).map(\.value)
+        let med = median(recentValues)
+        let mad = median(recentValues.map { abs($0 - med) })
+        let threshold = med + max(0.065, 2.0 * (mad == 0 ? 0.03 : mad))
+        let isPeak = candidate.value > previous.value && candidate.value >= next.value && candidate.value > threshold
+        guard isPeak else { return .none }
+
+        guard candidate.t - lastAcceptedStepTime >= Self.minStepIntervalSeconds else {
+            return .rejected
+        }
+        guard let pendingPeakTime else {
+            self.pendingPeakTime = candidate.t
+            return .candidate
+        }
+
+        let interval = candidate.t - pendingPeakTime
+        self.pendingPeakTime = candidate.t
+        guard interval >= Self.minStepIntervalSeconds && interval <= Self.maxStepIntervalSeconds else {
+            return .rejected
+        }
+        lastAcceptedStepTime = candidate.t
+        return .accepted
+    }
+}
+
 private func hypot3(_ x: Double, _ y: Double, _ z: Double) -> Double {
     (x * x + y * y + z * z).squareRoot()
+}
+
+private func median(_ values: [Double]) -> Double {
+    guard !values.isEmpty else { return 0 }
+    let sorted = values.sorted()
+    let middle = sorted.count / 2
+    if sorted.count.isMultiple(of: 2) { return (sorted[middle - 1] + sorted[middle]) / 2 }
+    return sorted[middle]
 }
