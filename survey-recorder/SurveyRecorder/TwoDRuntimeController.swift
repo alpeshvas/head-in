@@ -39,11 +39,21 @@ final class TwoDRuntimeController {
     @ObservationIgnored private var latestStepFeature: MagneticFeature2D?
     @ObservationIgnored private var latestStepFeatureIsUsable = false
     @ObservationIgnored private var lastStepFeature: MagneticFeature2D?
+    @ObservationIgnored private var recentStepYawDeltas: [Double] = []
+    @ObservationIgnored private var recentStepIntervals: [Double] = []
+    @ObservationIgnored private var lastStepTimestamp: TimeInterval?
+    @ObservationIgnored private let debugWriter: TwoDRuntimeDebugWriter?
 
-    init(map: VenueMap2D, heatmapCells: [MagneticHeatmapCell], observationMode: ParticleObservationMode2D = .absolute) {
+    init(
+        map: VenueMap2D,
+        heatmapCells: [MagneticHeatmapCell],
+        observationMode: ParticleObservationMode2D = .absolute,
+        debugWriter: TwoDRuntimeDebugWriter? = nil
+    ) {
         self.map = map
         self.heatmapCells = heatmapCells
         self.observationMode = observationMode
+        self.debugWriter = debugWriter
     }
 
     func start(at entrance: Entrance2D) {
@@ -81,8 +91,24 @@ final class TwoDRuntimeController {
         latestStepFeature = nil
         latestStepFeatureIsUsable = false
         lastStepFeature = nil
+        recentStepYawDeltas = []
+        recentStepIntervals = []
+        lastStepTimestamp = nil
         stepDetector.reset()
         if let filter { updateRuntimeDiagnostics(filter: filter) }
+        if let filter, let estimate {
+            debugWriter?.writeFilter(
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                phase: "initial",
+                estimate: estimate,
+                nearestCellDistance: nearestHeatmapCellDistanceMeters,
+                meanParticleCellDistance: meanParticleCellDistanceMeters,
+                farParticlePercent: farParticlePercent,
+                magneticResidualUT: magneticResidualUT,
+                turnRecoveryParticleCount: turnRecoveryParticleCount,
+                particles: filter.particles
+            )
+        }
         isRunning = true
         statusText = "Tracking from \(entrance.name)"
 
@@ -130,13 +156,15 @@ final class TwoDRuntimeController {
         )
         latestStepFeature = feature
         latestStepFeatureIsUsable = feature != nil && motion.magneticField.accuracy != .uncalibrated
+        debugWriter?.writeMotion(motion, feature: feature)
 
         switch stepDetector.addSample(t: timestamp, magnitude: uaMagnitude) {
         case .accepted:
             acceptStep(filter: filter)
         case .rejected:
             rejectedStepCandidateCount += 1
-        case .candidate, .none:
+            debugWriter?.writeRejectedPeak(timestamp: timestamp, rejectedPeaks: rejectedStepCandidateCount)
+        case .none:
             break
         }
     }
@@ -145,16 +173,57 @@ final class TwoDRuntimeController {
         guard isRunning else { return }
         applePedometerSteps = max(0, data.numberOfSteps.intValue)
         updateStepDifference()
+        debugWriter?.writePedometer(data, detectedSteps: detectedSteps)
     }
 
     private func acceptStep(filter: ParticleFilter2D) {
         detectedSteps += 1
         updateStepDifference()
         let stepYawDelta = pendingYawDelta
-        filter.predictStep(gyroDeltaRadians: stepYawDelta)
+        let stepTimestamp = previousMotionTimestamp ?? ProcessInfo.processInfo.systemUptime
+        // Step interval + rolling-median cadence feed the adaptive stride.
+        // median(_:) is the private helper at the bottom of this file.
+        let stepInterval = lastStepTimestamp.map { max(0, stepTimestamp - $0) } ?? 0
+        if stepInterval > 0 {
+            recentStepIntervals.append(stepInterval)
+            let window = ParticleFilter2DParams.recentStepIntervalWindow
+            if recentStepIntervals.count > window { recentStepIntervals.removeFirst(recentStepIntervals.count - window) }
+        }
+        let medianInterval = median(recentStepIntervals)
+        debugWriter?.writeStep(
+            index: detectedSteps,
+            timestamp: stepTimestamp,
+            yawDeltaRadians: stepYawDelta,
+            appleSteps: applePedometerSteps,
+            rejectedPeaks: rejectedStepCandidateCount,
+            stepIntervalSec: stepInterval,
+            medianStepIntervalSec: medianInterval
+        )
+        lastStepTimestamp = stepTimestamp
+        recentStepYawDeltas.append(stepYawDelta)
+        let maxYawWindowSteps = ParticleFilter2DParams.turnRecoveryWindowSteps
+        if recentStepYawDeltas.count > maxYawWindowSteps { recentStepYawDeltas.removeFirst(recentStepYawDeltas.count - maxYawWindowSteps) }
+        let windowYawDelta = recentStepYawDeltas.reduce(0, +)
+        let turnSignalYawDelta = abs(windowYawDelta) >= ParticleFilter2DParams.turnRecoveryWindowThresholdRadians ? windowYawDelta : stepYawDelta
+        filter.predictStep(gyroDeltaRadians: stepYawDelta, turnSignalRadians: turnSignalYawDelta, stepIntervalSeconds: stepInterval, recentMedianStepIntervalSeconds: medianInterval)
         lastStepYawDeltaDegrees = stepYawDelta * 180 / .pi
         turnRecoveryParticleCount = filter.lastTurnRecoveryParticleCount
         pendingYawDelta = 0
+        estimate = filter.estimate
+        updateRuntimeDiagnostics(filter: filter)
+        if let estimate {
+            debugWriter?.writeFilter(
+                timestamp: previousMotionTimestamp ?? ProcessInfo.processInfo.systemUptime,
+                phase: "afterPredict",
+                estimate: estimate,
+                nearestCellDistance: nearestHeatmapCellDistanceMeters,
+                meanParticleCellDistance: meanParticleCellDistanceMeters,
+                farParticlePercent: farParticlePercent,
+                magneticResidualUT: magneticResidualUT,
+                turnRecoveryParticleCount: turnRecoveryParticleCount,
+                particles: filter.particles
+            )
+        }
 
         if let feature = latestStepFeature, latestStepFeatureIsUsable {
             filter.observe(magnetic: feature, previous: lastStepFeature, mode: observationMode)
@@ -166,6 +235,19 @@ final class TwoDRuntimeController {
         }
         estimate = filter.estimate
         updateRuntimeDiagnostics(filter: filter)
+        if let estimate {
+            debugWriter?.writeFilter(
+                timestamp: previousMotionTimestamp ?? ProcessInfo.processInfo.systemUptime,
+                phase: "afterObserve",
+                estimate: estimate,
+                nearestCellDistance: nearestHeatmapCellDistanceMeters,
+                meanParticleCellDistance: meanParticleCellDistanceMeters,
+                farParticlePercent: farParticlePercent,
+                magneticResidualUT: magneticResidualUT,
+                turnRecoveryParticleCount: turnRecoveryParticleCount,
+                particles: filter.particles
+            )
+        }
         updateStatus()
     }
 
@@ -221,7 +303,6 @@ final class TwoDRuntimeController {
 
 private enum StepDetector2DResult {
     case none
-    case candidate
     case accepted
     case rejected
 }
@@ -232,19 +313,16 @@ private struct StepDetector2D {
         let value: Double
     }
 
-    private static let minStepIntervalSeconds = 0.42
-    private static let maxStepIntervalSeconds = 1.45
+    private static let minStepIntervalSeconds = 0.34
 
     private var raw: [TimedValue] = []
     private var smoothed: [TimedValue] = []
     private var lastAcceptedStepTime = -Double.infinity
-    private var pendingPeakTime: TimeInterval?
 
     mutating func reset() {
         raw.removeAll(keepingCapacity: true)
         smoothed.removeAll(keepingCapacity: true)
         lastAcceptedStepTime = -Double.infinity
-        pendingPeakTime = nil
     }
 
     mutating func addSample(t: TimeInterval, magnitude: Double) -> StepDetector2DResult {
@@ -256,11 +334,6 @@ private struct StepDetector2D {
         if smoothed.count > 160 { smoothed.removeFirst(smoothed.count - 160) }
         guard smoothed.count >= 5 else { return .none }
 
-        if let pendingPeakTime, t - pendingPeakTime > Self.maxStepIntervalSeconds {
-            self.pendingPeakTime = nil
-            return .rejected
-        }
-
         let candidateIndex = smoothed.count - 2
         let previous = smoothed[candidateIndex - 1]
         let candidate = smoothed[candidateIndex]
@@ -268,21 +341,11 @@ private struct StepDetector2D {
         let recentValues = smoothed.suffix(min(120, smoothed.count)).map(\.value)
         let med = median(recentValues)
         let mad = median(recentValues.map { abs($0 - med) })
-        let threshold = med + max(0.065, 2.0 * (mad == 0 ? 0.03 : mad))
+        let threshold = med + max(0.045, 1.6 * (mad == 0 ? 0.03 : mad))
         let isPeak = candidate.value > previous.value && candidate.value >= next.value && candidate.value > threshold
         guard isPeak else { return .none }
 
         guard candidate.t - lastAcceptedStepTime >= Self.minStepIntervalSeconds else {
-            return .rejected
-        }
-        guard let pendingPeakTime else {
-            self.pendingPeakTime = candidate.t
-            return .candidate
-        }
-
-        let interval = candidate.t - pendingPeakTime
-        self.pendingPeakTime = candidate.t
-        guard interval >= Self.minStepIntervalSeconds && interval <= Self.maxStepIntervalSeconds else {
             return .rejected
         }
         lastAcceptedStepTime = candidate.t

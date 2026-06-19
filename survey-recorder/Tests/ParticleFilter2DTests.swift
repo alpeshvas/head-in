@@ -3,8 +3,18 @@ import XCTest
 final class ParticleFilter2DTests: XCTestCase {
     func testPredictStepAppliesHeadingDeltaNoiseStepNoiseAndMotionEquation() {
         var rng = TestRNG(seed: 123)
-        let headingNoise = rng.normal(mean: 0, sigma: ParticleFilter2DParams.headingSigmaRadians)
-        let step = max(0.2, rng.normal(mean: ParticleFilter2DParams.stepLengthMeters, sigma: ParticleFilter2DParams.stepLengthSigmaMeters))
+        // Continuous heading sigma: base + k * |gyro|, capped at the recovery sigma.
+        let headingSigma = min(
+            ParticleFilter2DParams.turnRecoveryHeadingSigmaRadians,
+            ParticleFilter2DParams.headingSigmaRadians + ParticleFilter2DParams.headingSigmaTurnK * abs(0.4)
+        )
+        let headingNoise = rng.normal(mean: 0, sigma: headingSigma)
+        // Turn-shrink stepScale: stride shrinks with per-step yaw. With no
+        // interval signal (both 0) the cadence branch is skipped; only
+        // turn-shrink applies. gyroDelta 0.4 rad -> shrink = 1 - 0.6*0.4 = 0.76.
+        let yaw = min(abs(0.4), ParticleFilter2DParams.stepLengthTurnShrinkMaxRadians)
+        let stepScale = max(ParticleFilter2DParams.stepLengthTurnShrinkFloor, 1 - ParticleFilter2DParams.stepLengthTurnShrinkK * yaw)
+        let step = max(0.2, rng.normal(mean: ParticleFilter2DParams.stepLengthMeters, sigma: ParticleFilter2DParams.stepLengthSigmaMeters) * stepScale)
         let expectedHeading = 0.25 + 0.4 + headingNoise
 
         let filter = ParticleFilter2D(

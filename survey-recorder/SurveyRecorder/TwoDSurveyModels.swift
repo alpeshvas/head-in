@@ -58,6 +58,12 @@ struct ARMapTransform2D: Codable, Hashable {
         return MapPoint2D(x: p.x + translation.x, y: p.y + translation.y)
     }
 
+    func anchoredMapPoint(for ar: ARPoint2D, anchorAR: ARPoint2D, anchorMap: MapPoint2D) -> MapPoint2D {
+        let delta = ARPoint2D(x: ar.x - anchorAR.x, z: ar.z - anchorAR.z)
+        let p = Self.rotateAndScale(delta, scale: scale, rotation: rotationRadians)
+        return MapPoint2D(x: anchorMap.x + p.x, y: anchorMap.y + p.y)
+    }
+
     private static func rotateAndScale(_ ar: ARPoint2D, scale: Double, rotation: Double) -> MapPoint2D {
         let c = cos(rotation)
         let s = sin(rotation)

@@ -7,6 +7,10 @@ import UIKit
 import AppKit
 #endif
 
+/// Absolute sample-count target for the survey-strength colour ramp.
+/// A cell reaches the full sample-score contribution at this many samples.
+private let surveyStrengthSampleTarget = 50
+
 struct MapHeatmapView: View {
     @State private var mode = HeatmapMode2D.surveyStrength
     @State private var bundle = VenueMap2DStore.loadSavedOrBundled()
@@ -15,11 +19,13 @@ struct MapHeatmapView: View {
     @State private var activeImport: ImportKind?
     @State private var importError: String?
     @State private var saveNote: String?
+    @State private var confirmClear = false
     @State private var observationMode = ParticleObservationMode2D.absolute
 
     private enum ImportKind { case mapJSON, image }
     @State private var surveyController: TwoDSurveyController?
     @State private var runtimeController: TwoDRuntimeController?
+    @State private var debugController: TwoDRuntimeDebugController?
 
     private var map: VenueMap2D { bundle.map }
     private var cells: [MagneticHeatmapCell] {
@@ -48,9 +54,9 @@ struct MapHeatmapView: View {
                     map: map,
                     cells: cells,
                     mode: mode,
-                    currentPoint: surveyController?.latestMapPoint,
-                    runtimeEstimate: runtimeController?.estimate,
-                    runtimeParticles: runtimeController?.particleSnapshot ?? []
+                    currentPoint: debugController?.latestTruthMapPoint ?? surveyController?.latestMapPoint,
+                    runtimeEstimate: debugController?.runtimeEstimate ?? runtimeController?.estimate,
+                    runtimeParticles: debugController?.runtimeParticles ?? runtimeController?.particleSnapshot ?? []
                 )
                     .frame(height: 480)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -61,6 +67,7 @@ struct MapHeatmapView: View {
 
                 surveyCard
                 runtimeCard
+                debugRuntimeCard
                 legendCard
                 implementationCard
             }
@@ -115,6 +122,8 @@ struct MapHeatmapView: View {
                         surveyController = nil
                         runtimeController?.stop()
                         runtimeController = nil
+                        debugController?.stop(reason: "map_imported")
+                        debugController = nil
                     }
                     importError = nil
                 } catch {
@@ -159,7 +168,7 @@ struct MapHeatmapView: View {
         case .surveyStrength:
             let counts = cells.map(\.sampleCount)
             guard let lo = counts.min(), let hi = counts.max(), hi > 0 else { return nil }
-            return "\(lo)–\(hi) samples/cell"
+            return "\(lo)–\(hi) samples/cell (target \(surveyStrengthSampleTarget))"
         case .magneticMeanMagnitude:
             let values = cells.compactMap(\.meanMagnitudeUT)
             guard let lo = values.min(), let hi = values.max(), !values.isEmpty else { return nil }
@@ -206,10 +215,18 @@ struct MapHeatmapView: View {
                         .buttonStyle(.borderedProminent)
 
                         Button("Clear") {
-                            clearSurveyedHeatmap()
+                            confirmClear = true
                         }
                         .buttonStyle(.bordered)
                         .disabled(surveyController?.isRunning == true || cells.isEmpty)
+                        .confirmationDialog("Clear surveyed heatmap?", isPresented: $confirmClear, titleVisibility: .visible) {
+                            Button("Clear", role: .destructive) {
+                                clearSurveyedHeatmap()
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("This removes all surveyed cells from the saved map. This cannot be undone.")
+                        }
                     }
                 }
 
@@ -311,6 +328,67 @@ struct MapHeatmapView: View {
         }
     }
 
+    private var debugRuntimeCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("2D debug runtime")
+                            .font(.headline)
+                        Text(debugController?.statusText ?? "Record AR ground truth plus runtime sensors. Align, stand at the entrance, then anchor and start.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(debugController?.isRunning == true ? "Stop" : "Start debug") {
+                        toggleDebugRuntime()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(map.entrances.isEmpty || cells.isEmpty || !cellsHaveRuntimeFingerprint)
+                }
+
+                if let controller = debugController {
+                    HStack(spacing: 14) {
+                        stat("Tracking", controller.trackingStatus)
+                        stat("Runtime", controller.isRuntimeStarted ? "on" : "waiting")
+                        stat("Truth", controller.latestTruthMapPoint.map { String(format: "%.1f, %.1f", $0.x, $0.y) } ?? "-")
+                    }
+                    HStack(spacing: 14) {
+                        stat("Steps", "\(controller.detectedSteps)")
+                        stat("Apple steps", "\(controller.applePedometerSteps)")
+                        stat("Rejected peaks", "\(controller.rejectedStepCandidateCount)")
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            controller.captureNextAlignmentPoint()
+                        } label: {
+                            Label(debugAlignmentButtonTitle(controller), systemImage: "scope")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!controller.isRunning || controller.nextAlignmentPoint == nil || controller.isRuntimeStarted)
+
+                        Button {
+                            controller.anchorAndStartRuntime()
+                        } label: {
+                            Label("Anchor & Start", systemImage: "location.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!controller.isRunning || !controller.alignmentReady || controller.isRuntimeStarted)
+                    }
+                    if let url = controller.latestDebugFileURL {
+                        ShareLink(item: url) {
+                            Label(url.lastPathComponent, systemImage: "square.and.arrow.up")
+                                .font(.caption)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var implementationCard: some View {
         card {
             VStack(alignment: .leading, spacing: 8) {
@@ -340,6 +418,10 @@ struct MapHeatmapView: View {
             return
         }
         saveNote = nil
+        runtimeController?.stop()
+        runtimeController = nil
+        debugController?.stop(reason: "survey_started")
+        debugController = nil
         let controller = TwoDSurveyController(map: map, existingCells: cells)
         surveyController = controller
         controller.start()
@@ -354,6 +436,8 @@ struct MapHeatmapView: View {
             surveyController = nil
             runtimeController?.stop()
             runtimeController = nil
+            debugController?.stop(reason: "heatmap_cleared")
+            debugController = nil
             saveNote = "Cleared saved heatmap. Next survey starts fresh."
         } catch {
             importError = "Could not clear heatmap: \(error.localizedDescription)"
@@ -383,9 +467,26 @@ struct MapHeatmapView: View {
         }
         guard let entrance = map.entrances.first, cellsHaveRuntimeFingerprint else { return }
         surveyController?.stop()
+        debugController?.stop(reason: "regular_runtime_started")
+        debugController = nil
         let controller = TwoDRuntimeController(map: map, heatmapCells: cells, observationMode: observationMode)
         runtimeController = controller
         controller.start(at: entrance)
+    }
+
+    private func toggleDebugRuntime() {
+        if debugController?.isRunning == true {
+            debugController?.stop()
+            return
+        }
+        guard let entrance = map.entrances.first, cellsHaveRuntimeFingerprint else { return }
+        surveyController?.stop()
+        runtimeController?.stop()
+        runtimeController = nil
+        let debugBundle = VenueMapBundle2D(schema: bundle.schema, map: map, heatmapCells: cells)
+        let controller = TwoDRuntimeDebugController(bundle: debugBundle, observationMode: observationMode, entrance: entrance)
+        debugController = controller
+        controller.start()
     }
 
     private var runtimeUnavailableText: String {
@@ -395,6 +496,13 @@ struct MapHeatmapView: View {
     }
 
     private func alignmentButtonTitle(_ controller: TwoDSurveyController) -> String {
+        if let next = controller.nextAlignmentPoint {
+            return "Capture \(next.name)"
+        }
+        return controller.alignmentReady ? "Alignment complete" : "No alignment points"
+    }
+
+    private func debugAlignmentButtonTitle(_ controller: TwoDRuntimeDebugController) -> String {
         if let next = controller.nextAlignmentPoint {
             return "Capture \(next.name)"
         }
@@ -565,7 +673,6 @@ struct FloorPlanHeatmapCanvas: View {
             drawEmptyWalkableGrid(in: &context, transform: transform)
         }
 
-        let maxSamples = max(cells.map(\.sampleCount).max() ?? 1, 1)
         let magnitudeRange = valueRange(cells.compactMap(\.meanMagnitudeUT))
 
         for cell in cells {
@@ -574,7 +681,7 @@ struct FloorPlanHeatmapCanvas: View {
             let color: Color
             switch mode {
             case .surveyStrength:
-                let sampleScore = min(1, Double(cell.sampleCount) / Double(maxSamples))
+                let sampleScore = min(1, Double(cell.sampleCount) / Double(surveyStrengthSampleTarget))
                 let passScore = min(1, Double(cell.passCount) / 4.0)
                 let score = 0.65 * sampleScore + 0.35 * passScore
                 color = surveyStrengthColor(score)
@@ -735,7 +842,8 @@ struct FloorPlanHeatmapCanvas: View {
         }
     }
 
-    // Coverage ramp: red = sparse data, green = enough. High, opaque alpha so cells
+    // Coverage ramp: red = sparse data, green = enough. Sample score saturates at
+    // 50 samples/cell; pass score saturates at 4 passes. High, opaque alpha so cells
     // read clearly over the dark background and the dimmed floor-plan image.
     private func surveyStrengthColor(_ score: Double) -> Color {
         if score < 0.25 { return Color(red: 0.90, green: 0.20, blue: 0.20).opacity(0.78) }
