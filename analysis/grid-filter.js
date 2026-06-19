@@ -74,12 +74,65 @@ const PARAMS = {
   turnUTurnOffLeak: 0.5,     // on-route mass moved to OFF at the reversal itself
   turnReversalLeakPerStep: 0.12, // extra per-step leak after an unexplained reversal
   turnReversalSteps: 8,      // how many steps the reversal leak lasts
+  // Direction-latch toggle threshold (bidirectional-route-tracking.md §3.6): an
+  // unmatched rotation this large is a genuine ~180° REVERSAL (toggles the
+  // forward/backward latch), distinct from a ~90° route corner. Measured on the
+  // first round-trip: crisp turnaround = -200°, route corners ≤90° (§8.1), so
+  // 140° cleanly separates them. Tighter than turnNegativeMinDeg (100°, the OFF
+  // threshold) on purpose: a 100–139° unmatched turn still injects OFF but does
+  // NOT flip the travel direction.
+  turnReversalMinDeg: 140,
+  // Reversed-turn RECAPTURE on the return leg (bidirectional-route-tracking.md
+  // §11/§12). While `returning`, corners are re-crossed in reverse order with
+  // flipped sign; matching the NEXT expected reversed-signature corner (order
+  // enforced, not nearest-magnitude — LIS corners 76°/92° are too close)
+  // landmark-RESETS belief to that corner's bin. This carries the return leg
+  // across weak segments where the reverse emission alone drifts (LIS return
+  // P50 13.6→7.6 m). Validated offline against ARKit.
+  recaptureToleranceDeg: 55,
+  recaptureSigmaScale: 2,    // re-pin Gaussian width = this × turn.sigmaBins (min 8)
+  recapturePOff: 0.05,       // pOff after a recapture reset
   // A signature match only counts when the posterior already places this much
   // of its on-route mass within 3 sigma of a matched turn bin. Without the
   // gate, pacing U-turns on a route that itself contains a U-turn "match" from
   // across the route and defeat the OFF injection (seen live on L478).
   turnMatchMinSupport: 0.1,
+  // The posterior MEAN must be within this many sigma of a matched turn bin for
+  // the match to count: encodes "the filter believes the walker is AT the turn".
+  // Separates legit matches (≤2.8σ across all routes) from pacing U-turns that
+  // coincide in magnitude with a route turn while the mean is 3.4σ+ away (Ravi).
+  turnMatchMaxMeanSigma: 3.0,
+  // In-place pacing detector (non-filter firing gate). Pacing produces steps
+  // but no net displacement, so the live field stays confined to a small patch
+  // and varies far LESS than the venue's profile says it should over the ground
+  // a real walk covers. Measured venue-normalized over an 8 s window: forward
+  // walks cover ≥0.9× the profile's typical per-window field range at every
+  // venue (incl. weak-gradient office at 1.48×); pacing covers ≤0.70×. Below
+  // confinementFireMin, the walker is demonstrably not progressing — block
+  // checkpoint fires (belief/tracking untouched). Pure min/max over magnitude,
+  // so JS↔Swift identical (no turn-detector parity gap).
+  confinementWindowSec: 8,
+  confinementFireMin: 0.8,
+  confinementMinSamples: 30,
 };
+
+/** Median field-magnitude range over a ~stepsW-step window across the profile —
+ *  the venue's "typical per-window field variation" a real walk should cover. */
+function profileTypicalWindowRange(gp, stepsW = 6) {
+  const ranges = [];
+  for (const seg of gp.segments) {
+    if (seg.count < 10) continue;
+    const wbins = Math.max(8, Math.round(stepsW * seg.binsPerStep));
+    const end = seg.startBin + seg.count;
+    for (let i = seg.startBin; i + wbins <= end; i += Math.max(1, Math.round(wbins / 4))) {
+      let lo = Infinity, hi = -Infinity;
+      for (let j = i; j < i + wbins; j++) { if (gp.mean[j] < lo) lo = gp.mean[j]; if (gp.mean[j] > hi) hi = gp.mean[j]; }
+      ranges.push(hi - lo);
+    }
+  }
+  ranges.sort((a, b) => a - b);
+  return ranges.length ? ranges[Math.floor(ranges.length / 2)] : 1;
+}
 
 // ---------------------------------------------------------------------------
 // Session parsing (magnetic + user-acceleration + anchors + AR poses)
@@ -225,9 +278,14 @@ function segmentOfBin(gp, bin) {
  * the forward profile, unlike the direction-symmetric raw magnitude.
  * Returns per-point stats or null when the window does not fit.
  */
-function perPointLogLik(gp, live, endBin, sigmaOverride) {
+function perPointLogLik(gp, live, endBin, sigmaOverride, reverse = false) {
   const L = live.length;
-  if (endBin - L + 1 < 0 || endBin >= gp.bins) return null;
+  // Forward: window occupies bins [endBin-L+1 .. endBin] (newest at endBin, came
+  // from lower bins). Reverse (returning leg): newest sample at endBin, window
+  // extends to HIGHER bins (came from higher bins, retracing down), and the
+  // profile difference is read the other way — bidirectional-route-tracking.md §2.
+  if (reverse) { if (endBin + L - 1 >= gp.bins || endBin < 0) return null; }
+  else if (endBin - L + 1 < 0 || endBin >= gp.bins) return null;
 
   // Differences are taken at ONE STRIDE of lag (FollowMe differences at step
   // scale): adjacent-bin deltas (~5 cm) are noise-dominated, stride-scale
@@ -245,9 +303,23 @@ function perPointLogLik(gp, live, endBin, sigmaOverride) {
   const v = sigma * sigma;
   let ll = 0;
   const residuals = [];
+  // The live window is ALWAYS newest-sample-last (the provider's order). Forward:
+  // live[k] sits at bin (endBin-L+1+k), ascending — newest (k=L-1) at endBin.
+  // Reverse (returning): the newest sample is still the current position endBin,
+  // and older samples were at HIGHER bins (you came from up-route), so live[k]
+  // sits at bin (endBin + (L-1-k)), and the profile is read downward.
   for (let k = 0; k + lag < L; k++) {
-    const idx = endBin - L + 1 + k;
-    const resid = (live[k + lag] - live[k]) - (gp.mean[idx + lag] - gp.mean[idx]);
+    const liveDiff = live[k + lag] - live[k];
+    let profDiff;
+    if (reverse) {
+      const binK = endBin + (L - 1 - k);          // bin of live[k]
+      const binKlag = endBin + (L - 1 - (k + lag)); // bin of live[k+lag] (lower)
+      profDiff = gp.mean[binKlag] - gp.mean[binK];
+    } else {
+      const idx = endBin - L + 1 + k;
+      profDiff = gp.mean[idx + lag] - gp.mean[idx];
+    }
+    const resid = liveDiff - profDiff;
     ll += -0.5 * (resid * resid / v + Math.log(2 * Math.PI * v));
     residuals.push(resid);
   }
@@ -265,6 +337,18 @@ class RouteGridFilter {
     for (let i = 0; i < Math.min(8, globalProfile.bins); i++) this.belief[i] = Math.exp(-i / 3);
     this.pOff = 0.0;
     this.reversalStepsLeft = 0;
+    // Direction latch (docs/research/bidirectional-route-tracking.md §3.6 + §4-C):
+    // a persistent forward/backward state toggled by a detected near-180° U-turn.
+    // While `returning`, checkpoint fires stay suppressed for the WHOLE return
+    // leg (not just the 8-step reversal window) — this is the validated
+    // "detect reversal → suppress + flag" increment, NOT reverse position
+    // tracking (which needs a strong-field round-trip to validate, §8.2). The
+    // U-turn detection itself is validated: a crisp pivot reads as ~-200° vs the
+    // route's own ≤90° corners (§8.1).
+    this.returning = false;
+    // Reverse-signature recapture cursor: index of the NEXT expected corner on
+    // the return leg, consumed end-first. -1 when not returning.
+    this.revCursor = -1;
     // Last mode while the filter was confidently on-route — OFF re-entry
     // anchors here (route-constrained-fusion.md: "re-entry kernel centered on
     // last on-route mode").
@@ -293,20 +377,28 @@ class RouteGridFilter {
     const next = new Float64Array(gp.bins).fill(0);
     let leaked = 0;
 
+    // Direction-aware drift (bidirectional-route-tracking.md §1, §9): forward
+    // advances +stride; while the `returning` latch is set the walker is
+    // retracing the path, so the kernel mean is −stride and the asymmetric tail
+    // flips (3 strides backward, small forward tail). The 1-D belief is
+    // direction-agnostic; only this drift sign needs to follow the latch.
+    const dir = this.returning ? -1 : 1;
     for (let i = 0; i < gp.bins; i++) {
       const p = this.belief[i];
       if (p <= 0) continue;
       const m = segmentOfBin(gp, i).binsPerStep;
+      const drift = dir * m;
       const sigma = Math.max(0.8, PARAMS.stepNoiseFrac * m);
-      const lo = Math.floor(i - m);          // allow a backward step
-      const hi = Math.ceil(i + 3 * m);       // up to 3 strides forward
+      // support: one stride against the drift, up to 3 strides with it.
+      const lo = Math.floor(dir > 0 ? i - m : i - 3 * m);
+      const hi = Math.ceil(dir > 0 ? i + 3 * m : i + m);
       let kernelSum = 0;
       for (let j = lo; j <= hi; j++) {
-        kernelSum += Math.exp(-0.5 * ((j - i - m) / sigma) ** 2) + PARAMS.kernelFloor;
+        kernelSum += Math.exp(-0.5 * ((j - i - drift) / sigma) ** 2) + PARAMS.kernelFloor;
       }
       const stay = p * (1 - PARAMS.offLeakPerStep);
       for (let j = lo; j <= hi; j++) {
-        const k = Math.exp(-0.5 * ((j - i - m) / sigma) ** 2) + PARAMS.kernelFloor;
+        const k = Math.exp(-0.5 * ((j - i - drift) / sigma) ** 2) + PARAMS.kernelFloor;
         const share = stay * (k / kernelSum);
         if (j < 0) {
           next[0] += share;                  // route start is a barrier
@@ -408,15 +500,19 @@ class RouteGridFilter {
     const windowCache = new Map();
     let anyWindow = false;
 
+    // While returning, read the profile in reverse (window extends to higher
+    // bins from s); forward reads it as before (window extends to lower bins).
+    const reverse = this.returning;
     for (let s = 0; s < gp.bins; s++) {
       const seg = segmentOfBin(gp, s);
       if (!windowCache.has(seg.index)) windowCache.set(seg.index, liveWindowForSegment(seg));
       const live = windowCache.get(seg.index);
       if (!live) continue;
       const L = live.length;
-      if (s - L + 1 < 0) continue; // window must fit inside the route start
+      // window must fit inside the route (start for forward, end for reverse)
+      if (reverse ? (s + L - 1 >= gp.bins) : (s - L + 1 < 0)) continue;
 
-      const stats = perPointLogLik(gp, live, s);
+      const stats = perPointLogLik(gp, live, s, undefined, reverse);
       if (!stats) continue;
       logLik[s] = stats.perPoint * PARAMS.obsIndependenceBins; // temper autocorrelation
       anyWindow = true;
@@ -463,10 +559,47 @@ class RouteGridFilter {
    * signature turn pushes mass into OFF.
    */
   observeTurn(deltaDeg) {
+    // RETURN-LEG RECAPTURE (bidirectional-route-tracking.md §11): while
+    // returning, the corners are re-crossed in reverse order with flipped sign.
+    // Match the NEXT expected reversed-signature corner (order-enforced via
+    // revCursor, set when the latch flipped to backward) and landmark-RESET
+    // belief to it. This runs INSTEAD of the forward matched/unmatched logic
+    // while returning — that logic is forward-oriented and would misfire here.
+    if (this.returning && this.revCursor >= 0 && this.revCursor < this.gp.turns.length) {
+      const turn = this.gp.turns[this.revCursor];
+      const expected = -turn.deltaDeg; // opposite sign on the return
+      if (Math.sign(expected) === Math.sign(deltaDeg) &&
+          Math.abs(deltaDeg - expected) <= PARAMS.recaptureToleranceDeg) {
+        this.revCursor -= 1;
+        const sigma = Math.max(turn.sigmaBins, 8) * PARAMS.recaptureSigmaScale;
+        for (let i = 0; i < this.belief.length; i++) {
+          this.belief[i] = Math.exp(-0.5 * ((i - turn.bin) / sigma) ** 2);
+        }
+        this.pOff = PARAMS.recapturePOff;
+        this.reversalStepsLeft = 0;
+        this.lastTurnSupport = null;
+        this.normalize();
+        return true;
+      }
+      // not the next expected corner: fall through (ignore as a minor turn, or
+      // treat a near-180° as a potential re-flip below).
+    }
+
     let matches = this.gp.turns.filter(
       (turn) => Math.sign(turn.deltaDeg) === Math.sign(deltaDeg) &&
         Math.abs(deltaDeg - turn.deltaDeg) <= PARAMS.turnMatchToleranceDeg
     );
+    if (matches.length) {
+      // Proximity gate: a turn match means "the walker is physically AT this
+      // route turn", so the posterior must be CENTERED on the turn bin, not
+      // merely have a tail reaching it. A pacing U-turn coinciding in magnitude
+      // with a route turn fires while the posterior mean sits 3σ+ away (the
+      // step-march has not actually reached the turn); across all routes every
+      // legitimate match has the mean within 2.8σ of its turn, every Ravi pacing
+      // match 3.4σ+. Keep only matched turns within turnMatchMaxMeanSigma.
+      const mean = this.meanBin();
+      matches = matches.filter((turn) => Math.abs(mean - turn.bin) <= PARAMS.turnMatchMaxMeanSigma * turn.sigmaBins);
+    }
     if (matches.length) {
       // Posterior-support gate: a match from across the route is no match.
       let support = 0;
@@ -493,6 +626,32 @@ class RouteGridFilter {
       }
       this.pOff += moved;
       this.reversalStepsLeft = PARAMS.turnReversalSteps;
+      // A near-180° unmatched rotation MAY be a genuine travel-direction
+      // reversal — but only when the posterior is at the relevant TERMINUS
+      // (bidirectional-route-tracking.md §3.6 condition c): a forward→backward
+      // flip is an end-of-route turnaround (belief near the last bin); a
+      // backward→forward flip is a return-to-start (belief near bin 0). This
+      // separates the genuine turnaround from a route's OWN U-turn region that
+      // failed to match mid-route (Ravi +178°@mid-route must NOT flip the
+      // latch — that regressed a forward walk in iteration 1). A 100–139°
+      // unmatched turn injects OFF as before but never flips the latch.
+      if (Math.abs(deltaDeg) >= PARAMS.turnReversalMinDeg) {
+        // Terminus = the last segment (far end) / first segment (start). Route-
+        // relative, so it works across 720–1680-bin routes without a tuned
+        // absolute width.
+        const mean = this.meanBin();
+        const firstSeg = this.gp.segments[0];
+        const lastSeg = this.gp.segments[this.gp.segments.length - 1];
+        const atEnd = mean >= lastSeg.startBin;
+        const atStart = mean < firstSeg.startBin + firstSeg.count;
+        if (!this.returning && atEnd) {
+          this.returning = true;                       // turnaround at route end
+          this.revCursor = this.gp.turns.length - 1;   // recapture corners end-first
+        } else if (this.returning && atStart) {
+          this.returning = false;                      // back at the start
+          this.revCursor = -1;
+        }
+      }
       this.normalize();
       return false;
     }
@@ -512,10 +671,14 @@ class RouteGridFilter {
     return true;
   }
 
-  /** True while recent motion is unexplained (after an unmatched U-turn):
-   *  checkpoint decisions must not fire on progress made in this state. */
+  /** True while recent motion is unexplained (after an unmatched U-turn) OR the
+   *  direction latch says the walker is returning: checkpoint decisions must not
+   *  fire on progress made in either state. The `returning` latch extends fire
+   *  suppression across the whole return leg (§3.6/§4-C), where the 8-step
+   *  reversal window would otherwise expire and let the forward step-march
+   *  false-advance again. */
   reversalActive() {
-    return this.reversalStepsLeft > 0;
+    return this.reversalStepsLeft > 0 || this.returning;
   }
 
   meanBin() {
@@ -712,6 +875,24 @@ function replay(profile, session) {
   let observed = 0;
   let stepsSinceObservation = Infinity;
 
+  // In-place pacing gate: the live field range over the last confinementWindow,
+  // normalized by the venue's typical per-window field range. Below the floor,
+  // the walker is not covering ground — block fires. (session.dm[].mag is the
+  // magnitude.) See profileTypicalWindowRange / PARAMS.confinement*.
+  const profileRange = profileTypicalWindowRange(gp);
+  const confinementRatio = (t) => {
+    const W = PARAMS.confinementWindowSec;
+    let lo = Infinity, hi = -Infinity, n = 0;
+    for (const s of session.dm) {
+      if (s.t < t - W) continue;
+      if (s.t > t) break;
+      if (!Number.isFinite(s.mag)) continue;
+      if (s.mag < lo) lo = s.mag; if (s.mag > hi) hi = s.mag; n++;
+    }
+    if (n < PARAMS.confinementMinSamples) return Infinity; // too little data: don't gate
+    return (hi - lo) / Math.max(profileRange, 1e-6);
+  };
+
   // Terminal region: within one stride of the route end. Once essentially all
   // on-route mass is here, the magnetic emission has nothing left to
   // discriminate — live windows start to include post-route field and would
@@ -738,9 +919,18 @@ function replay(profile, session) {
         filter.applyUnobservedLeak();
       }
     } else if (ev.kind === 'turn') {
-      // Live stops at route completion; mirror that so the surveyor's
-      // end-of-recording turn-around is not scored as evidence.
-      if (checkpointStates.every((cp) => cp.firedAt !== null)) continue;
+      // Forward route done: a guided tour ends at the last checkpoint, so a
+      // surveyor's small post-route movements must not be scored as forward
+      // evidence. BUT a near-180° terminus U-turn after completion is the
+      // to-and-fro turnaround — it must still reach observeTurn so the
+      // `returning` latch can flip and the return leg can track
+      // (bidirectional-route-tracking.md §13: the pre-§13 unconditional skip
+      // here was the offline mirror of the Live `completeRoute()` teardown that
+      // killed return tracking). Once returning, deliver every turn so the
+      // reversed-signature corners can recapture. observeTurn's own terminus
+      // guard (§3.6c) still decides whether the flip actually happens.
+      const routeDone = checkpointStates.every((cp) => cp.firedAt !== null);
+      if (routeDone && !filter.returning && Math.abs(ev.deltaDeg) < PARAMS.turnReversalMinDeg) continue;
       const matched = filter.observeTurn(ev.deltaDeg);
       turnLog.push({ t: ev.t, deltaDeg: ev.deltaDeg, matched, support: filter.lastTurnSupport, pOffAfter: filter.pOff });
     } else {
@@ -757,6 +947,7 @@ function replay(profile, session) {
       // events, and neither may progress made while the heading is unexplained.
       const ok = stepsSinceObservation <= PARAMS.observationRecencySteps
         && !filter.reversalActive()
+        && confinementRatio(ev.t) >= PARAMS.confinementFireMin
         && filter.probBeyond(cp.decisionBin) / Math.max(1 - pOff, 1e-9) > PARAMS.checkpointTau
         && pOff < 0.5;
       cp.consecutive = ok ? cp.consecutive + 1 : 0;

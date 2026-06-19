@@ -34,7 +34,33 @@ enum FilterParams {
     static let turnUTurnOffLeak = 0.5
     static let turnReversalLeakPerStep = 0.12
     static let turnReversalSteps = 8
+    // Direction-latch toggle threshold (bidirectional-route-tracking.md §3.6): an
+    // unmatched rotation this large is a genuine ~180° reversal (toggles the
+    // forward/backward latch), distinct from a ~90° route corner. Measured on the
+    // first round-trip: crisp turnaround −200°, route corners ≤90° (§8.1). Tighter
+    // than turnNegativeMinDeg (100°) on purpose: a 100–139° unmatched turn injects
+    // OFF but does NOT flip travel direction.
+    static let turnReversalMinDeg = 140.0
+    // Reversed-turn recapture on the return leg (bidirectional-route-tracking.md
+    // §11/§12). Match the next expected reversed-signature corner (order-enforced)
+    // and landmark-reset belief to its bin; carries the return leg across weak
+    // segments where the reverse emission drifts.
+    static let recaptureToleranceDeg = 55.0
+    static let recaptureSigmaScale = 2.0
+    static let recapturePOff = 0.05
     static let turnMatchMinSupport = 0.1
+    // Posterior mean must be within this many sigma of a matched turn bin (the
+    // filter must believe the walker is AT the turn). Rejects pacing U-turns
+    // that coincide in magnitude with a route turn while the mean is 3σ+ away.
+    static let turnMatchMaxMeanSigma = 3.0
+    // In-place pacing firing gate (controller-level). Below confinementFireMin,
+    // the live field over confinementWindowSec varies less than confinementFireMin
+    // × the venue's typical per-window range → the walker is not covering ground
+    // (pacing) → block checkpoint fires. Pure magnitude min/max, so JS↔Swift
+    // identical. Forward walks measured ≥0.9× at every venue; pacing ≤0.70×.
+    static let confinementWindowSec = 8.0
+    static let confinementFireMin = 0.8
+    static let confinementMinSamples = 30
 }
 
 /// All profile segments concatenated onto one global bin axis.
@@ -61,6 +87,10 @@ struct GlobalRouteProfile {
     let diffSigmaUT: Double
     let offLogLikPerPoint: Double
     let bins: Int
+    /// Median field-magnitude range over a ~6-step window across the route — the
+    /// venue's typical per-window field variation a real walk should cover. The
+    /// in-place pacing gate normalizes the live window range by this.
+    let typicalWindowRange: Double
 
     init(profile: RouteProfile) throws {
         var mean: [Double] = []
@@ -93,6 +123,24 @@ struct GlobalRouteProfile {
         self.segments = segments
         self.bins = mean.count
 
+        // Profile's typical per-window field range (median over ~6-step windows).
+        var ranges: [Double] = []
+        let stepsW = 6.0
+        for seg in segments where seg.count >= 10 {
+            let wbins = max(8, Int((stepsW * seg.binsPerStep).rounded()))
+            let end = seg.startBin + seg.count
+            var i = seg.startBin
+            let stride = max(1, wbins / 4)
+            while i + wbins <= end {
+                var lo = Double.infinity, hi = -Double.infinity
+                for j in i..<(i + wbins) { lo = min(lo, mean[j]); hi = max(hi, mean[j]) }
+                ranges.append(hi - lo)
+                i += stride
+            }
+        }
+        ranges.sort()
+        self.typicalWindowRange = ranges.isEmpty ? 1 : ranges[ranges.count / 2]
+
         var checkpoints: [(String, Int, Int)] = []
         for seg in segments {
             let bin = seg.startBin + seg.count - 1
@@ -118,6 +166,17 @@ final class RouteBeliefFilter {
     private(set) var belief: [Double]
     private(set) var pOff: Double = 0
     private var reversalStepsLeft = 0
+    /// Direction latch (bidirectional-route-tracking.md §3.6 + §4-C): a persistent
+    /// forward/backward state toggled by a near-180° U-turn detected at a route
+    /// terminus. While `returning`, checkpoint fires stay suppressed for the WHOLE
+    /// return leg (via reversalActive), not just the 8-step reversal window. This
+    /// is the validated detect-reversal-and-suppress increment, NOT reverse
+    /// position tracking (deferred, §8.2). Exposed for the Live UI "Returning"
+    /// status.
+    private(set) var returning = false
+    /// Reverse-signature recapture cursor: index of the next expected corner on
+    /// the return leg, consumed end-first. -1 when not returning.
+    private var revCursor = -1
     /// Last mode while confidently on-route — OFF re-entry anchors here
     /// (route-constrained-fusion.md: "re-entry kernel centered on last
     /// on-route mode").
@@ -159,21 +218,26 @@ final class RouteBeliefFilter {
         var next = [Double](repeating: 0, count: gp.bins)
         var leaked = 0.0
 
+        // Direction-aware drift (bidirectional-route-tracking.md §1, §9): +stride
+        // forward, −stride while the `returning` latch retraces the path. Mirror
+        // of grid-filter.js predictStep.
+        let dir = returning ? -1.0 : 1.0
         for i in 0..<gp.bins {
             let p = belief[i]
             if p <= 0 { continue }
             let m = gp.segment(ofBin: i).binsPerStep
+            let drift = dir * m
             let sigma = max(0.8, FilterParams.stepNoiseFrac * m)
-            let lo = Int((Double(i) - m).rounded(.down))
-            let hi = Int((Double(i) + 3 * m).rounded(.up))
+            let lo = Int((Double(i) + (dir > 0 ? -m : -3 * m)).rounded(.down))
+            let hi = Int((Double(i) + (dir > 0 ? 3 * m : m)).rounded(.up))
             var kernelSum = 0.0
             for j in lo...hi {
-                let d = (Double(j - i) - m) / sigma
+                let d = (Double(j - i) - drift) / sigma
                 kernelSum += exp(-0.5 * d * d) + FilterParams.kernelFloor
             }
             let stay = p * (1 - FilterParams.offLeakPerStep)
             for j in lo...hi {
-                let d = (Double(j - i) - m) / sigma
+                let d = (Double(j - i) - drift) / sigma
                 let k = exp(-0.5 * d * d) + FilterParams.kernelFloor
                 let share = stay * (k / kernelSum)
                 if j < 0 {
@@ -236,15 +300,48 @@ final class RouteBeliefFilter {
     /// belief that already has support near the signature bin; an unmatched
     /// U-turn-scale rotation is a transition into OFF plus a sustained leak
     /// while the heading stays unexplained. Returns true on a signature match.
-    /// True while recent motion is unexplained (after an unmatched U-turn):
-    /// checkpoint decisions must not fire on progress made in this state.
-    var reversalActive: Bool { reversalStepsLeft > 0 }
+    /// True while recent motion is unexplained (after an unmatched U-turn) OR the
+    /// direction latch says the walker is returning: checkpoint decisions must not
+    /// fire on progress made in either state. The `returning` latch extends fire
+    /// suppression across the whole return leg (§3.6/§4-C).
+    var reversalActive: Bool { reversalStepsLeft > 0 || returning }
 
     @discardableResult
     func observeTurn(deltaDeg: Double) -> Bool {
+        // RETURN-LEG RECAPTURE (bidirectional-route-tracking.md §11): while
+        // returning, match the next expected reversed-signature corner (opposite
+        // sign, order-enforced via revCursor) and landmark-RESET belief to it.
+        // Runs instead of the forward matched/unmatched logic while returning.
+        if returning, revCursor >= 0, revCursor < profile.turns.count {
+            let turn = profile.turns[revCursor]
+            let expected = -turn.deltaDeg
+            if (expected < 0) == (deltaDeg < 0),
+               abs(deltaDeg - expected) <= FilterParams.recaptureToleranceDeg {
+                revCursor -= 1
+                let sigma = max(turn.sigmaBins, 8) * FilterParams.recaptureSigmaScale
+                for i in belief.indices {
+                    let d = (Double(i) - Double(turn.bin)) / sigma
+                    belief[i] = exp(-0.5 * d * d)
+                }
+                pOff = FilterParams.recapturePOff
+                reversalStepsLeft = 0
+                normalize()
+                return true
+            }
+        }
+
         var matches = profile.turns.filter {
             ($0.deltaDeg < 0) == (deltaDeg < 0) &&
                 abs(deltaDeg - $0.deltaDeg) <= FilterParams.turnMatchToleranceDeg
+        }
+        if !matches.isEmpty {
+            // Proximity gate: a turn match means "the walker is physically AT this
+            // route turn", so the posterior must be CENTERED on the turn bin, not
+            // merely have a tail reaching it. A pacing U-turn coinciding in
+            // magnitude with a route turn fires while the posterior mean sits 3σ+
+            // away (Ravi-place); every legitimate match has the mean within 2.8σ.
+            let mean = meanBin
+            matches = matches.filter { abs(mean - Double($0.bin)) <= FilterParams.turnMatchMaxMeanSigma * $0.sigmaBins }
         }
         if !matches.isEmpty {
             // Posterior-support gate: a match from across the route is no match.
@@ -268,6 +365,27 @@ final class RouteBeliefFilter {
             }
             pOff += moved
             reversalStepsLeft = FilterParams.turnReversalSteps
+            // Direction latch: a near-180° unmatched rotation flips forward/
+            // backward, but only when the posterior is at the relevant TERMINUS
+            // (last segment for an end turnaround; first segment for a return to
+            // start). This separates a genuine turnaround from a route's own
+            // U-turn region that failed to match mid-route. A 100–139° turn
+            // injects OFF as before but never flips the latch. (See JS
+            // grid-filter.js observeTurn; bidirectional-route-tracking.md §3.6.)
+            if abs(deltaDeg) >= FilterParams.turnReversalMinDeg {
+                let mean = meanBin
+                let firstSeg = profile.segments[0]
+                let lastSeg = profile.segments[profile.segments.count - 1]
+                let atEnd = mean >= Double(lastSeg.startBin)
+                let atStart = mean < Double(firstSeg.startBin + firstSeg.count)
+                if !returning && atEnd {
+                    returning = true
+                    revCursor = profile.turns.count - 1   // recapture corners end-first
+                } else if returning && atStart {
+                    returning = false
+                    revCursor = -1
+                }
+            }
             normalize()
             return false
         }
@@ -339,21 +457,33 @@ final class RouteBeliefFilter {
         // Single fitted homoscedastic difference noise (Magicol: one sigma per
         // building) — the per-bin survey std is NOT used: adjacent-bin map
         // errors are common-mode and cancel in differences.
+        // While returning, read the profile in reverse (window extends to higher
+        // bins from s, profile difference read downward); mirror of grid-filter.js
+        // perPointLogLik(..., reverse). Window is newest-sample-last either way.
+        let reverse = returning
         let v = gp.diffSigmaUT * gp.diffSigmaUT
         for s in 0..<gp.bins {
             let seg = gp.segment(ofBin: s)
             if windowCache[seg.index] == nil { windowCache[seg.index] = windowForSegment(seg) }
             guard let live = windowCache[seg.index] ?? nil else { continue }
             let L = live.count
-            guard s - L + 1 >= 0 else { continue }
+            guard reverse ? (s + L - 1 < gp.bins) : (s - L + 1 >= 0) else { continue }
             let lag = max(2, Int(seg.binsPerStep.rounded()))
             guard L > lag else { continue }
 
             var ll = 0.0
             var k = 0
             while k + lag < L {
-                let idx = s - L + 1 + k
-                let resid = (live[k + lag] - live[k]) - (gp.mean[idx + lag] - gp.mean[idx])
+                let profDiff: Double
+                if reverse {
+                    let binK = s + (L - 1 - k)
+                    let binKlag = s + (L - 1 - (k + lag))
+                    profDiff = gp.mean[binKlag] - gp.mean[binK]
+                } else {
+                    let idx = s - L + 1 + k
+                    profDiff = gp.mean[idx + lag] - gp.mean[idx]
+                }
+                let resid = (live[k + lag] - live[k]) - profDiff
                 ll += -0.5 * (resid * resid / v + log(2 * Double.pi * v))
                 k += 1
             }

@@ -1,41 +1,49 @@
 # Indoor Positioning
 
-Prototype workspace for phone-only indoor positioning using magnetic fingerprinting, inertial sensors, and map constraints.
+Prototype workspace for phone-only indoor positioning using magnetic fingerprinting, inertial sensors, and route constraints.
 
-## Research First
+## Research / Reference Docs
 
-The most important artifacts right now are:
+Start here:
 
+- [Hardware-less Indoor Positioning Research](docs/hardware-less-solutions-research.md)
+- [Architecture](docs/architecture.md)
+- [Route Belief Filter Q&A](docs/route-belief-filter-qna.md)
 - [Indoor Positioning Research Notes](docs/research-notes.md)
-- [Architecture Sketch](docs/architecture.md)
 - [Dex GPS vs Indoor Positioning Checkpoint Triggers](docs/dex-gps-vs-indoor-positioning.md)
 
 ## Product Direction
 
 The first useful target is route-constrained positioning, not free-form indoor GPS:
 
-- Record magnetic, accelerometer, gyroscope, and step data while surveying known indoor routes.
-- Anchor survey sessions at known checkpoints or map positions.
+- Record magnetic, accelerometer, gyroscope, gravity/device-motion, step, and optional barometer data while surveying known indoor routes.
+- Anchor survey sessions at known checkpoints.
 - Build fingerprint profiles for route segments.
-- Match live phone sensor readings against those profiles.
-- Emit confidence-scored events such as `near_checkpoint`, `wrong_segment`, or `low_confidence`.
+- Run a route-constrained grid Bayes filter over route-position bins plus an explicit `OFF` state.
+- Emit conservative events such as checkpoint arrival, route progress, off-route/low-confidence state, or manual-fallback prompts.
 
-## MVP Milestones
+The product should promise **checkpoint / route / zone confidence**, not an arbitrary indoor blue dot.
 
-1. Survey recorder — **done** (`survey-recorder/`, see below)
-2. Checkpoint anchoring workflow — **done** (anchor button + undo in the recorder)
-3. Local survey session format — **done** (JSONL, schema in [research notes](docs/research-notes.md))
-4. Fingerprint processing pipeline — **started** (`analysis/`, repeatability + profile builder)
-5. Route-segment matcher — **started** (offline matcher)
-6. Confidence scoring and fallback rules
+## Current Prototype Status
+
+1. Survey recorder — **done** (`survey-recorder/`).
+2. Checkpoint anchoring workflow — **done** (anchor button + undo in the recorder).
+3. JSONL session format — **done** (schema notes in [research notes](docs/research-notes.md)).
+4. Fingerprint profile builder — **done for prototype use** (`analysis/build-profile.js`).
+5. Offline replay/reference filter — **done** (`analysis/grid-filter.js`).
+6. Live iOS route filter — **done for prototype use** (`RouteBeliefFilter.swift` + `LivePositioningController.swift`).
+7. Confidence/off-route/fallback behavior — **implemented, still validation-driven**.
 
 ## Survey Recorder (iOS)
 
-A standalone SwiftUI app in `survey-recorder/` that records `CMDeviceMotion`
-(calibrated magnetic field, attitude, rotation, acceleration), raw magnetometer,
-pedometer, and barometer samples at 100Hz into JSONL session files, with a
-checkpoint anchor button. Sessions are exportable via the share sheet and the
-Files app.
+A standalone SwiftUI app in `survey-recorder/` records:
+
+- `CMDeviceMotion` calibrated magnetic field, attitude, rotation, user acceleration, and gravity at 100Hz
+- raw magnetometer fallback/debug samples
+- pedometer updates
+- barometer samples for future use only
+- checkpoint anchor taps
+- optional surveyor-only ARKit ground truth for offline evaluation
 
 ```sh
 brew install xcodegen           # one-time
@@ -46,57 +54,47 @@ open SurveyRecorder.xcodeproj   # set your signing team, run on a physical iPhon
 
 Sensors don't exist on the simulator — surveys require a real device.
 
-## Repeatability Analysis (feasibility spike)
+## Build a Route Profile
 
-After walking the same route 3-5 times with the recorder, compare passes:
+After walking the same route 3-5 times with anchors, build a reusable magnetic route profile:
+
+```sh
+npm run build-profile -- recordings-new/Plumeria_Test_forward_hand_normal_*.jsonl --out profiles/plumeria-test-forward.json
+```
+
+The profile contains:
+
+- ordered anchors/checkpoints
+- route segments
+- magnetic magnitude mean/stddev arrays in route bins
+- median step counts per segment
+- optional turn signatures
+- fitted calibration for magnetic observation likelihoods
+
+## Replay the Grid Filter Offline
+
+Replay a recorded session against a route profile:
+
+```sh
+node analysis/grid-filter.js profiles/plumeria-test-forward.json recordings-new/Plumeria_Test_forward_hand_live_20260611-113118.jsonl --out analysis/replay.html
+```
+
+The offline JS filter is the reference implementation for the Swift runtime filter. Keep them in sync and regenerate parity fixtures when filter math changes.
+
+## Useful Commands
 
 ```sh
 npm run analyze -- session1.jsonl session2.jsonl session3.jsonl --out analysis/report.html
+npm run build-profile -- session1.jsonl session2.jsonl session3.jsonl --out profiles/name.json
+node analysis/grid-filter.js profiles/name.json session.jsonl --out analysis/filter-report.html
+npm test
 ```
-
-Per anchor-to-anchor segment it reports pass-over-pass Pearson correlation and
-DTW deviation of the magnetic magnitude trace, plus an HTML report with
-overlaid traces. STRONG (r >= 0.8) means magnetic fingerprinting is viable on
-that route; WEAK means the venue is magnetically hostile and no matcher will
-fix it.
-
-## PDR + Magnetic Replay Prototype
-
-After collecting 3+ sessions, run a leave-one-session-out replay that builds a
-fingerprint from the other passes, estimates route progress from accelerometer
-step peaks, and uses magnetic matching as a correction near the PDR prior:
-
-```sh
-npm run position -- session1.jsonl session2.jsonl session3.jsonl --out analysis/pdr-report.html
-```
-
-This is not a production tracker yet. With only Start/End anchors, its error
-metric is measured against normalized replay time. Add intermediate anchors to
-validate real checkpoint/position error.
-
-## Route Profile + Offline Matcher
-
-Build a reusable fingerprint profile from repeated walks:
-
-```sh
-npm run build-profile -- Meadows_Test_forward_hand_*.jsonl --out profiles/meadows-test-forward.json
-```
-
-Then replay a session against that profile:
-
-```sh
-npm run match -- profiles/meadows-test-forward.json Meadows_Test_forward_hand_20260610-200257.jsonl --out analysis/meadows-match.html
-```
-
-The profile builder classifies very short/adjacent anchor spans as
-`transition` segments and excludes them from magnetic matching. The matcher uses
-recorded anchors only to split offline validation segments; a production runtime
-matcher still needs a live segment-state model.
 
 ## Notes
 
-- No venue-installed hardware.
-- No camera dependency.
-- Routes are single-floor. Floor detection is out of scope for v1.
-- Design for checkpoint or zone accuracy before promising a precise blue dot.
-- 
+- No venue-installed hardware for the default approach.
+- No camera dependency for the end-user runtime.
+- ARKit is surveyor-only ground truth tooling.
+- Routes are single-floor; floor detection is out of scope for v1.
+- Current map constraint is a 1D surveyed route profile, not a full 2D wall/floor-plan mesh.
+- Design for checkpoint or zone accuracy before promising precise blue-dot location.

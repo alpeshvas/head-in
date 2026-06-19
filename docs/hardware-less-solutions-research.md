@@ -47,7 +47,11 @@ Current codebase status:
 - Gradients/deltas: the current matcher uses stride-scale first differences, e.g. "how much did magnetic magnitude change over roughly one step?" This compares `(live[k + lag] - live[k])` against the profile difference at the candidate route position. The difference is in µT; if normalized by physical distance it becomes µT/m.
 - Map/route recording: the prototype does not yet store a full floor-plan or wall polygons. The survey app records route metadata, an ordered checkpoint list, and `anchor` taps. `build-profile.js` turns consecutive anchors into profile `segments[]` with `from`, `to`, magnetic means/stddevs, step statistics, calibration, and optional turn signatures. That profile is the current route map.
 - Runtime algorithm: the app currently uses `RouteBeliefFilter`, a discrete-grid Bayes filter / HMM over concatenated route-position bins plus one explicit `OFF` state. It is not a particle filter. A particle filter would keep many sampled candidate states and reweight them; this code instead stores `belief[]`, a probability for every route bin, plus `pOff`. It is closest to a fine-grained route-segment belief model.
+- Predict/observe loop: detected steps call `predictStep()` to move probability forward; magnetic windows call `observe(...)` to reweight bins; turns call `observeTurn(...)` as sparse landmarks or off-route evidence; normalization keeps `sum(belief) + pOff = 1`.
+- Turn detection usage: `build-profile.js` extracts repeatable turn signatures offline; live turn observations are currently hand-carry only (`livePose == .hand`) because pocket leg-swing distorted turn magnitudes.
+- Current checkpoint decision: `probBeyond(decisionBin) / onRoute > 0.8`, `stepsSinceObservation <= 2`, `pOff < 0.5`, no active reversal, and the condition must hold for 2 consecutive updates.
 - Current wall constraint behavior: because no wall geometry is stored, the app does not literally know walls. It prevents impossible movement by allowing probability only along the surveyed route profile; if the live sensor evidence cannot be explained by that route, probability moves into the `OFF` state.
+- 2D positioning: possible later, but moderate-to-hard from the current state. It needs a floor-plan coordinate system, dense `(x,y)` fingerprints, heading uncertainty, and stronger map constraints; with current route-only data it would likely be noisier than the 1D route filter at first.
 
 Expected reliability:
 
@@ -74,7 +78,7 @@ Implementation shape:
 
 - Survey each route segment 3-5 times per direction.
 - Store samples by normalized route distance, not only timestamp.
-- Use magnetic magnitude (µT) plus stride-scale gradients/deltas (µT change over movement) to reduce device orientation and model bias.
+- Use magnetic magnitude (µT) plus stride-scale gradients/deltas (µT change over movement) to reduce device orientation and model bias. See [Route Belief Filter Q&A](route-belief-filter-qna.md) for the current predict/observe logic and filter thresholds.
 - Detect turns and pauses; reject candidates inconsistent with route geometry.
 - Keep multiple hypotheses until a checkpoint or distinctive magnetic landmark resolves them.
 - Emit `near_checkpoint`, `progressed_to_segment`, `possibly_off_route`, and `low_confidence`.

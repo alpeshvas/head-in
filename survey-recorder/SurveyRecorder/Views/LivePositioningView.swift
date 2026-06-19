@@ -3,6 +3,7 @@ import SwiftUI
 
 struct LivePositioningView: View {
     @AppStorage("liveProfileResource") private var profileResource = RouteProfile.bundledProfiles[0].resource
+    @Environment(RouteRegistry.self) private var registry
 
     @State private var controller: LivePositioningController?
     @State private var loadError: String?
@@ -22,6 +23,8 @@ struct LivePositioningView: View {
             }
         }
         .navigationTitle("Live")
+        .toolbarColorScheme(.dark, for: .navigationBar)
+        .toolbarBackground(Instrument.ink, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -42,6 +45,7 @@ struct LivePositioningView: View {
             }
         }
         .task(loadProfile)
+        .onAppear(perform: applyDisplayNames)
         .onDisappear {
             controller?.stop()
         }
@@ -51,8 +55,23 @@ struct LivePositioningView: View {
         guard controller == nil, loadError == nil else { return }
         do {
             controller = try LivePositioningController(profile: RouteProfile.loadBundled(resource: profileResource))
+            applyDisplayNames()
         } catch {
             loadError = "Could not load the bundled route profile: \(error.localizedDescription)"
+        }
+    }
+
+    /// Bridge survey-registry checkpoint names onto the Live display when a route
+    /// with the same venue/route and the same number of anchors exists. Re-runs
+    /// on appear so renames made in the Survey tab show up here.
+    private func applyDisplayNames() {
+        guard let controller else { return }
+        let r = controller.profile.route
+        if let record = registry.record(venueId: r.venueId, routeId: r.routeId),
+           record.checkpoints.count == controller.profile.anchors.count {
+            controller.checkpointDisplayNames = record.checkpoints
+        } else {
+            controller.checkpointDisplayNames = nil
         }
     }
 
@@ -67,48 +86,49 @@ struct LivePositioningView: View {
 
 private struct LivePositioningContent: View {
     let controller: LivePositioningController
+    @State private var pathData: RoutePathData?
 
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
                 primaryCard
-                routeTimelineCard
                 controlsCard
+                if let pathData { card { RouteMapView(controller: controller, pathData: pathData) } }
                 routeOnlyCard
                 diagnosticsCard
             }
             .padding()
         }
-        .background(Color(.systemGroupedBackground))
+        .background(InstrumentBackground())
+        .environment(\.colorScheme, .dark)
+        .onAppear { pathData = RoutePathData.load(resource: controller.profile.sourceResource ?? "") }
     }
 
     private var primaryCard: some View {
         card {
             VStack(alignment: .leading, spacing: 18) {
                 HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Known route mode")
-                            .font(.title2.bold())
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("KNOWN ROUTE").monoTag()
                         Text(controller.profile.routeLabel)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 19, weight: .bold, design: .monospaced))
+                            .foregroundStyle(Instrument.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
-                    VStack(alignment: .trailing, spacing: 8) {
-                        statusPill
-                        motionPill
+                    VStack(alignment: .trailing, spacing: 7) {
+                        InstrumentChip(text: statusDisplayText, color: statusColor)
+                        InstrumentChip(text: controller.motionModeLabel, color: motionModeColor, icon: motionModeIcon)
                     }
                 }
 
                 HStack(alignment: .center, spacing: 20) {
                     progressRing
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Current segment")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .textCase(.uppercase)
+                    VStack(alignment: .leading, spacing: 9) {
+                        Text("CURRENT SEGMENT").monoTag()
                         Text(controller.currentSegmentLabel)
-                            .font(.title3.bold())
+                            .font(.system(size: 18, weight: .bold, design: .monospaced))
+                            .foregroundStyle(Instrument.textPrimary)
                             .fixedSize(horizontal: false, vertical: true)
                         nextCheckpointPill
                     }
@@ -118,7 +138,7 @@ private struct LivePositioningContent: View {
                 if !controller.deviceMotionAvailable {
                     Label("Live matching needs Core Motion on a physical iPhone.", systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Instrument.amber)
                 }
             }
         }
@@ -126,103 +146,46 @@ private struct LivePositioningContent: View {
 
     private var progressRing: some View {
         ZStack {
-            Circle()
-                .stroke(Color(.systemGray5), lineWidth: 11)
+            Circle().stroke(Instrument.hairline, lineWidth: 9)
             Circle()
                 .trim(from: 0, to: min(1, max(0, controller.segmentProgress)))
                 .stroke(
-                    controller.isProgressStale ? Color(.systemGray3) : statusColor,
-                    style: StrokeStyle(lineWidth: 11, lineCap: .round)
+                    controller.isProgressStale ? Instrument.steel : statusColor,
+                    style: StrokeStyle(lineWidth: 9, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
+                .shadow(color: controller.isProgressStale ? .clear : statusColor.opacity(0.6), radius: 5)
                 .animation(.easeOut(duration: 0.25), value: controller.segmentProgress)
             VStack(spacing: 2) {
                 Text(controller.progressPercentText)
-                    .font(.title.bold().monospacedDigit())
-                    .foregroundStyle(controller.isProgressStale ? .secondary : .primary)
-                Text(controller.isProgressStale ? "last agreed" : "segment")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 28, weight: .bold, design: .monospaced))
+                    .foregroundStyle(controller.isProgressStale ? Instrument.textSecondary : Instrument.textPrimary)
+                Text(controller.isProgressStale ? "LAST AGREED" : "SEGMENT").monoTag()
             }
         }
-        .frame(width: 126, height: 126)
-    }
-
-    private var statusPill: some View {
-        Text(statusDisplayText)
-            .font(.caption.bold())
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
-            .background(statusColor.opacity(0.16), in: Capsule())
-            .foregroundStyle(statusColor)
-    }
-
-    private var motionPill: some View {
-        Label(controller.motionModeLabel, systemImage: motionModeIcon)
-            .font(.caption.bold())
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(motionModeColor.opacity(0.14), in: Capsule())
-            .foregroundStyle(motionModeColor)
+        .frame(width: 122, height: 122)
     }
 
     private var nextCheckpointPill: some View {
-        HStack(spacing: 8) {
-            Image(systemName: controller.isComplete ? "checkmark.circle.fill" : "mappin.and.ellipse")
-            Text(controller.isComplete ? "Route finished" : "Next: \(controller.nextCheckpoint)")
-                .fontWeight(.semibold)
+        HStack(spacing: 7) {
+            Image(systemName: controller.isComplete ? "checkmark.circle.fill" : "scope")
+                .font(.system(size: 11, weight: .bold))
+            Text(controller.isComplete ? "ROUTE FINISHED" : "NEXT · \(controller.nextCheckpoint)")
+                .font(.system(size: 11, weight: .bold, design: .monospaced)).tracking(0.8)
+                .lineLimit(1).truncationMode(.tail)
         }
-        .font(.subheadline)
         .foregroundStyle(statusColor)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(statusColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var routeTimelineCard: some View {
-        card {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Route timeline")
-                    .font(.headline)
-
-                VStack(spacing: 12) {
-                    ForEach(controller.profile.anchors) { anchor in
-                        timelineRow(anchor)
-                    }
-                }
-            }
-        }
-    }
-
-    private func timelineRow(_ anchor: RouteAnchor) -> some View {
-        let state = checkpointState(for: anchor)
-        return HStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(state.color.opacity(state == .upcoming ? 0.12 : 0.18))
-                    .frame(width: 30, height: 30)
-                Image(systemName: state.iconName)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(state.color)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(anchor.name)
-                    .font(.subheadline.weight(state == .current ? .bold : .semibold))
-                    .foregroundStyle(state == .upcoming ? .secondary : .primary)
-                Text(state.label)
-                    .font(.caption)
-                    .foregroundStyle(state.color)
-            }
-            Spacer()
-        }
+        .padding(.horizontal, 11).padding(.vertical, 8)
+        .background(statusColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(statusColor.opacity(0.4), lineWidth: 1))
     }
 
     private var controlsCard: some View {
         card {
-            VStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 12) {
                 // Carry pose, user-selected: the runtime cannot yet detect
                 // pocketing, and turn evidence must be off in pocket.
+                Text("CARRY MODE").monoTag()
                 Picker("Carry", selection: Binding(
                     get: { controller.livePose },
                     set: { controller.livePose = $0 }
@@ -233,26 +196,21 @@ private struct LivePositioningContent: View {
                 .pickerStyle(.segmented)
                 .disabled(controller.isRunning)
 
-                Button {
-                    controller.startOrReset()
-                } label: {
-                    Label(startButtonTitle, systemImage: "location.fill")
-                        .frame(maxWidth: .infinity)
-                        .font(.headline)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(!controller.deviceMotionAvailable)
+                HStack(spacing: 10) {
+                    Button { controller.startOrReset() } label: {
+                        Label(startButtonTitle, systemImage: "location.fill")
+                    }
+                    .buttonStyle(InstrumentButtonStyle(tint: Instrument.phosphor, prominent: true))
+                    .disabled(!controller.deviceMotionAvailable)
 
-                Button(role: .destructive) {
-                    controller.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.circle")
-                        .frame(maxWidth: .infinity)
+                    Button { controller.stop() } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                    .buttonStyle(InstrumentButtonStyle(tint: Instrument.coral, prominent: false))
+                    .disabled(!controller.isRunning)
+                    .opacity(controller.isRunning ? 1 : 0.4)
+                    .frame(maxWidth: 130)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(!controller.isRunning)
             }
         }
     }
@@ -261,11 +219,11 @@ private struct LivePositioningContent: View {
         card {
             Label {
                 Text(controller.limitationCopy)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Instrument.textSecondary)
             } icon: {
                 Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(Instrument.phosphor)
             }
         }
     }
@@ -297,33 +255,33 @@ private struct LivePositioningContent: View {
                 }
                 .padding(.top, 12)
             } label: {
-                Label("Diagnostics", systemImage: "waveform.path.ecg")
-                    .font(.headline)
+                Label("DIAGNOSTICS", systemImage: "waveform.path.ecg")
+                    .font(.system(size: 13, weight: .bold, design: .monospaced)).tracking(1.0)
+                    .foregroundStyle(Instrument.textSecondary)
             }
+            .tint(Instrument.textSecondary)
         }
     }
 
     private func diagnosticRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Instrument.textTertiary)
             Spacer(minLength: 12)
             Text(value)
-                .font(.callout.monospacedDigit())
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Instrument.textPrimary)
                 .multilineTextAlignment(.trailing)
         }
-        .font(.callout)
     }
 
     private func card<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content()
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        content().instrumentPanel()
     }
 
     private var startButtonTitle: String {
-        controller.isRunning || controller.totalSampleCount > 0 || controller.isComplete ? "Reset to Start" : "Start at Start"
+        controller.isRunning || controller.totalSampleCount > 0 || controller.isComplete ? "Restart" : "Start Tracking"
     }
 
     private var statusDisplayText: String {
@@ -344,21 +302,22 @@ private struct LivePositioningContent: View {
     }
 
     private var statusColor: Color {
-        if controller.isComplete { return .green }
+        if controller.isComplete { return Instrument.phosphor }
         if controller.statusText == "Off route?"
-            || controller.statusText == "Phone moving" { return .red }
-        if controller.statusText == "Low magnetic signal" { return .orange }
-        if controller.statusText.hasPrefix("Near") { return .green }
-        if controller.isRunning && controller.statusText == "Walking" { return .blue }
-        return .secondary
+            || controller.statusText == "Phone moving" { return Instrument.coral }
+        if controller.statusText == "Low magnetic signal"
+            || controller.statusText == "Holding position" { return Instrument.amber }
+        if controller.statusText.hasPrefix("Near") { return Instrument.phosphor }
+        if controller.isRunning && controller.statusText == "Walking" { return Instrument.phosphor }
+        return Instrument.textSecondary
     }
 
     private var motionModeColor: Color {
         switch controller.motionModeLabel {
-        case "Walking": return .blue
-        case "Phone moving": return .red
-        case "Standing": return .secondary
-        default: return .secondary
+        case "Walking": return Instrument.phosphor
+        case "Phone moving": return Instrument.coral
+        case "Standing": return Instrument.textSecondary
+        default: return Instrument.textTertiary
         }
     }
 
@@ -371,49 +330,7 @@ private struct LivePositioningContent: View {
         }
     }
 
-    private func checkpointState(for anchor: RouteAnchor) -> CheckpointState {
-        if controller.isComplete { return .complete }
-
-        let activePosition = controller.activeSegmentPosition
-        if !controller.isRunning && controller.totalSampleCount == 0 {
-            return anchor.index == 0 ? .current : .upcoming
-        }
-        if anchor.index <= activePosition { return .complete }
-        if anchor.index == activePosition + 1 { return .current }
-        return .upcoming
-    }
-
     private func percent(_ value: Double) -> String {
         "\(Int((value * 100).rounded()))%"
-    }
-}
-
-private enum CheckpointState {
-    case complete
-    case current
-    case upcoming
-
-    var color: Color {
-        switch self {
-        case .complete: return .green
-        case .current: return .blue
-        case .upcoming: return .secondary
-        }
-    }
-
-    var iconName: String {
-        switch self {
-        case .complete: return "checkmark"
-        case .current: return "location.fill"
-        case .upcoming: return "circle.fill"
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .complete: return "Reached"
-        case .current: return "Current target"
-        case .upcoming: return "Upcoming"
-        }
     }
 }
