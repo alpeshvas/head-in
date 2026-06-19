@@ -73,9 +73,9 @@ private struct LivePositioningContent: View {
         ScrollView {
             VStack(spacing: 16) {
                 primaryCard
+                controlsCard
                 if let pathData { card { RouteMapView(controller: controller, pathData: pathData) } }
                 routeTimelineCard
-                controlsCard
                 routeOnlyCard
                 diagnosticsCard
             }
