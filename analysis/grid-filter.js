@@ -79,6 +79,11 @@ const PARAMS = {
   // gate, pacing U-turns on a route that itself contains a U-turn "match" from
   // across the route and defeat the OFF injection (seen live on L478).
   turnMatchMinSupport: 0.1,
+  // The posterior MEAN must be within this many sigma of a matched turn bin for
+  // the match to count: encodes "the filter believes the walker is AT the turn".
+  // Separates legit matches (≤2.8σ across all routes) from pacing U-turns that
+  // coincide in magnitude with a route turn while the mean is 3.4σ+ away (Ravi).
+  turnMatchMaxMeanSigma: 3.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -467,6 +472,17 @@ class RouteGridFilter {
       (turn) => Math.sign(turn.deltaDeg) === Math.sign(deltaDeg) &&
         Math.abs(deltaDeg - turn.deltaDeg) <= PARAMS.turnMatchToleranceDeg
     );
+    if (matches.length) {
+      // Proximity gate: a turn match means "the walker is physically AT this
+      // route turn", so the posterior must be CENTERED on the turn bin, not
+      // merely have a tail reaching it. A pacing U-turn coinciding in magnitude
+      // with a route turn fires while the posterior mean sits 3σ+ away (the
+      // step-march has not actually reached the turn); across all routes every
+      // legitimate match has the mean within 2.8σ of its turn, every Ravi pacing
+      // match 3.4σ+. Keep only matched turns within turnMatchMaxMeanSigma.
+      const mean = this.meanBin();
+      matches = matches.filter((turn) => Math.abs(mean - turn.bin) <= PARAMS.turnMatchMaxMeanSigma * turn.sigmaBins);
+    }
     if (matches.length) {
       // Posterior-support gate: a match from across the route is no match.
       let support = 0;

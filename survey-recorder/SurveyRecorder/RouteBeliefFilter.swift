@@ -35,6 +35,10 @@ enum FilterParams {
     static let turnReversalLeakPerStep = 0.12
     static let turnReversalSteps = 8
     static let turnMatchMinSupport = 0.1
+    // Posterior mean must be within this many sigma of a matched turn bin (the
+    // filter must believe the walker is AT the turn). Rejects pacing U-turns
+    // that coincide in magnitude with a route turn while the mean is 3σ+ away.
+    static let turnMatchMaxMeanSigma = 3.0
 }
 
 /// All profile segments concatenated onto one global bin axis.
@@ -245,6 +249,15 @@ final class RouteBeliefFilter {
         var matches = profile.turns.filter {
             ($0.deltaDeg < 0) == (deltaDeg < 0) &&
                 abs(deltaDeg - $0.deltaDeg) <= FilterParams.turnMatchToleranceDeg
+        }
+        if !matches.isEmpty {
+            // Proximity gate: a turn match means "the walker is physically AT this
+            // route turn", so the posterior must be CENTERED on the turn bin, not
+            // merely have a tail reaching it. A pacing U-turn coinciding in
+            // magnitude with a route turn fires while the posterior mean sits 3σ+
+            // away (Ravi-place); every legitimate match has the mean within 2.8σ.
+            let mean = meanBin
+            matches = matches.filter { abs(mean - Double($0.bin)) <= FilterParams.turnMatchMaxMeanSigma * $0.sigmaBins }
         }
         if !matches.isEmpty {
             // Posterior-support gate: a match from across the route is no match.
