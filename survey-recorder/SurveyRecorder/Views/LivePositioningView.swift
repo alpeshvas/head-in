@@ -67,11 +67,13 @@ struct LivePositioningView: View {
 
 private struct LivePositioningContent: View {
     let controller: LivePositioningController
+    @State private var pathData: RoutePathData?
 
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
                 primaryCard
+                if let pathData { card { RouteMapView(controller: controller, pathData: pathData) } }
                 routeTimelineCard
                 controlsCard
                 routeOnlyCard
@@ -80,6 +82,7 @@ private struct LivePositioningContent: View {
             .padding()
         }
         .background(Color(.systemGroupedBackground))
+        .onAppear { pathData = RoutePathData.load(resource: controller.profile.sourceResource ?? "") }
     }
 
     private var primaryCard: some View {
