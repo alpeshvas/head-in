@@ -82,6 +82,16 @@ const PARAMS = {
   // threshold) on purpose: a 100–139° unmatched turn still injects OFF but does
   // NOT flip the travel direction.
   turnReversalMinDeg: 140,
+  // Reversed-turn RECAPTURE on the return leg (bidirectional-route-tracking.md
+  // §11/§12). While `returning`, corners are re-crossed in reverse order with
+  // flipped sign; matching the NEXT expected reversed-signature corner (order
+  // enforced, not nearest-magnitude — LIS corners 76°/92° are too close)
+  // landmark-RESETS belief to that corner's bin. This carries the return leg
+  // across weak segments where the reverse emission alone drifts (LIS return
+  // P50 13.6→7.6 m). Validated offline against ARKit.
+  recaptureToleranceDeg: 55,
+  recaptureSigmaScale: 2,    // re-pin Gaussian width = this × turn.sigmaBins (min 8)
+  recapturePOff: 0.05,       // pOff after a recapture reset
   // A signature match only counts when the posterior already places this much
   // of its on-route mass within 3 sigma of a matched turn bin. Without the
   // gate, pacing U-turns on a route that itself contains a U-turn "match" from
@@ -336,6 +346,9 @@ class RouteGridFilter {
     // U-turn detection itself is validated: a crisp pivot reads as ~-200° vs the
     // route's own ≤90° corners (§8.1).
     this.returning = false;
+    // Reverse-signature recapture cursor: index of the NEXT expected corner on
+    // the return leg, consumed end-first. -1 when not returning.
+    this.revCursor = -1;
     // Last mode while the filter was confidently on-route — OFF re-entry
     // anchors here (route-constrained-fusion.md: "re-entry kernel centered on
     // last on-route mode").
@@ -546,6 +559,32 @@ class RouteGridFilter {
    * signature turn pushes mass into OFF.
    */
   observeTurn(deltaDeg) {
+    // RETURN-LEG RECAPTURE (bidirectional-route-tracking.md §11): while
+    // returning, the corners are re-crossed in reverse order with flipped sign.
+    // Match the NEXT expected reversed-signature corner (order-enforced via
+    // revCursor, set when the latch flipped to backward) and landmark-RESET
+    // belief to it. This runs INSTEAD of the forward matched/unmatched logic
+    // while returning — that logic is forward-oriented and would misfire here.
+    if (this.returning && this.revCursor >= 0 && this.revCursor < this.gp.turns.length) {
+      const turn = this.gp.turns[this.revCursor];
+      const expected = -turn.deltaDeg; // opposite sign on the return
+      if (Math.sign(expected) === Math.sign(deltaDeg) &&
+          Math.abs(deltaDeg - expected) <= PARAMS.recaptureToleranceDeg) {
+        this.revCursor -= 1;
+        const sigma = Math.max(turn.sigmaBins, 8) * PARAMS.recaptureSigmaScale;
+        for (let i = 0; i < this.belief.length; i++) {
+          this.belief[i] = Math.exp(-0.5 * ((i - turn.bin) / sigma) ** 2);
+        }
+        this.pOff = PARAMS.recapturePOff;
+        this.reversalStepsLeft = 0;
+        this.lastTurnSupport = null;
+        this.normalize();
+        return true;
+      }
+      // not the next expected corner: fall through (ignore as a minor turn, or
+      // treat a near-180° as a potential re-flip below).
+    }
+
     let matches = this.gp.turns.filter(
       (turn) => Math.sign(turn.deltaDeg) === Math.sign(deltaDeg) &&
         Math.abs(deltaDeg - turn.deltaDeg) <= PARAMS.turnMatchToleranceDeg
@@ -605,8 +644,13 @@ class RouteGridFilter {
         const lastSeg = this.gp.segments[this.gp.segments.length - 1];
         const atEnd = mean >= lastSeg.startBin;
         const atStart = mean < firstSeg.startBin + firstSeg.count;
-        if (!this.returning && atEnd) this.returning = true;          // turnaround at route end
-        else if (this.returning && atStart) this.returning = false;   // back at the start
+        if (!this.returning && atEnd) {
+          this.returning = true;                       // turnaround at route end
+          this.revCursor = this.gp.turns.length - 1;   // recapture corners end-first
+        } else if (this.returning && atStart) {
+          this.returning = false;                      // back at the start
+          this.revCursor = -1;
+        }
       }
       this.normalize();
       return false;

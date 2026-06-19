@@ -41,6 +41,13 @@ enum FilterParams {
     // than turnNegativeMinDeg (100°) on purpose: a 100–139° unmatched turn injects
     // OFF but does NOT flip travel direction.
     static let turnReversalMinDeg = 140.0
+    // Reversed-turn recapture on the return leg (bidirectional-route-tracking.md
+    // §11/§12). Match the next expected reversed-signature corner (order-enforced)
+    // and landmark-reset belief to its bin; carries the return leg across weak
+    // segments where the reverse emission drifts.
+    static let recaptureToleranceDeg = 55.0
+    static let recaptureSigmaScale = 2.0
+    static let recapturePOff = 0.05
     static let turnMatchMinSupport = 0.1
     // Posterior mean must be within this many sigma of a matched turn bin (the
     // filter must believe the walker is AT the turn). Rejects pacing U-turns
@@ -167,6 +174,9 @@ final class RouteBeliefFilter {
     /// position tracking (deferred, §8.2). Exposed for the Live UI "Returning"
     /// status.
     private(set) var returning = false
+    /// Reverse-signature recapture cursor: index of the next expected corner on
+    /// the return leg, consumed end-first. -1 when not returning.
+    private var revCursor = -1
     /// Last mode while confidently on-route — OFF re-entry anchors here
     /// (route-constrained-fusion.md: "re-entry kernel centered on last
     /// on-route mode").
@@ -298,6 +308,28 @@ final class RouteBeliefFilter {
 
     @discardableResult
     func observeTurn(deltaDeg: Double) -> Bool {
+        // RETURN-LEG RECAPTURE (bidirectional-route-tracking.md §11): while
+        // returning, match the next expected reversed-signature corner (opposite
+        // sign, order-enforced via revCursor) and landmark-RESET belief to it.
+        // Runs instead of the forward matched/unmatched logic while returning.
+        if returning, revCursor >= 0, revCursor < profile.turns.count {
+            let turn = profile.turns[revCursor]
+            let expected = -turn.deltaDeg
+            if (expected < 0) == (deltaDeg < 0),
+               abs(deltaDeg - expected) <= FilterParams.recaptureToleranceDeg {
+                revCursor -= 1
+                let sigma = max(turn.sigmaBins, 8) * FilterParams.recaptureSigmaScale
+                for i in belief.indices {
+                    let d = (Double(i) - Double(turn.bin)) / sigma
+                    belief[i] = exp(-0.5 * d * d)
+                }
+                pOff = FilterParams.recapturePOff
+                reversalStepsLeft = 0
+                normalize()
+                return true
+            }
+        }
+
         var matches = profile.turns.filter {
             ($0.deltaDeg < 0) == (deltaDeg < 0) &&
                 abs(deltaDeg - $0.deltaDeg) <= FilterParams.turnMatchToleranceDeg
@@ -346,8 +378,13 @@ final class RouteBeliefFilter {
                 let lastSeg = profile.segments[profile.segments.count - 1]
                 let atEnd = mean >= Double(lastSeg.startBin)
                 let atStart = mean < Double(firstSeg.startBin + firstSeg.count)
-                if !returning && atEnd { returning = true }
-                else if returning && atStart { returning = false }
+                if !returning && atEnd {
+                    returning = true
+                    revCursor = profile.turns.count - 1   // recapture corners end-first
+                } else if returning && atStart {
+                    returning = false
+                    revCursor = -1
+                }
             }
             normalize()
             return false
