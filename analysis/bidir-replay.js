@@ -32,7 +32,7 @@
 const fs = require('fs');
 const {
   buildGlobalProfile, parseSession, detectSteps, makeWindowProvider,
-  segmentOfBin, perPointLogLik, PARAMS,
+  segmentOfBin, perPointLogLik, PARAMS, replay,
 } = require('./grid-filter.js');
 const { detectTurns } = require('./turn-events.js');
 const { buildArcLength } = require('./ground-truth.js');
@@ -434,6 +434,50 @@ function directionalReplay(profile, session, { latchMode = 'gyro', recapture = f
 }
 
 // --------------------------------------------------------------------------
+// SHIPPED-path round-trip report (bidirectional-route-tracking.md §13).
+//
+// Drives the REAL grid-filter.js replay() — the same RouteGridFilter +
+// stabilizers (mode-anchored OFF re-entry, terminal freeze, unobserved leak,
+// confinement gate) and the latch + −stride + reverse emission + reversed-turn
+// recapture that ship in the filter — and scores forward/return legs vs ARKit.
+//
+// This SUPERSEDES the DirectionalFilter `--filter/--recapture/--oracle` path
+// above: that runs a stale parallel loop with the known-buggy
+// perPointLogLikReverse (§10) and no stabilizers, which is why it reported
+// 7.59 m where this reports ~3.26 m. Use --shipped for the honest number.
+function shippedReport(profile, session) {
+  const gp = buildGlobalProfile(profile);
+  const gt = buildTrueBinMapper(session, gp);
+  if (!gt) { console.log('No ARKit ground truth / not a single out-and-back — cannot score.'); return; }
+  const t0 = session.anchors.length ? session.anchors[0].t : session.dm[0].t;
+  const r = replay(profile, session);
+  const mpb = gt.outboundArc / Math.max(gp.bins - 1, 1);
+
+  // Latch + recapture trace (turnLog carries every observed turn; while
+  // returning, a matched turn IS a reversed-signature corner recapture).
+  console.log(`\n=== SHIPPED replay() round-trip (the Live-path filter) ===`);
+  console.log(`turnaround t+${(gt.turnT - t0).toFixed(1)}s  outboundArc ${gt.outboundArc.toFixed(1)}m  returnArc ${gt.returnArc.toFixed(1)}m`);
+  const fired = r.checkpointStates.filter((c) => c.firedAt !== null).length;
+  console.log(`forward checkpoints fired: ${fired}/${r.checkpointStates.length}` +
+    (fired < r.checkpointStates.length ? '  (last unfired — see §13 lifecycle note)' : ''));
+  console.log(`final returning=${r.filter.returning}`);
+  for (const tl of r.turnLog) {
+    console.log(`  turn t+${(tl.t - t0).toFixed(1)}s  ${tl.deltaDeg > 0 ? '+' : ''}${tl.deltaDeg.toFixed(0)}° -> ${tl.matched ? 'MATCH' : 'unmatched'}  pOff ${tl.pOffAfter.toFixed(2)}`);
+  }
+
+  const fwd = [], ret = [];
+  for (const row of r.timeline) {
+    if (row.kind !== 'step') continue;
+    const err = Math.abs(row.meanBin - gt.trueBinAt(row.t)) * mpb;
+    (gt.isReturn(row.t) ? ret : fwd).push(err);
+  }
+  const pct = (a, p) => { if (!a.length) return NaN; const s = a.slice().sort((x, y) => x - y); return s[Math.floor(p * (s.length - 1))]; };
+  console.log('-'.repeat(60));
+  console.log(`Forward leg (n=${fwd.length}): P50 ${pct(fwd, 0.5)?.toFixed(2)} m · P75 ${pct(fwd, 0.75)?.toFixed(2)} m`);
+  console.log(`Return  leg (n=${ret.length}): P50 ${pct(ret, 0.5)?.toFixed(2)} m · P75 ${pct(ret, 0.75)?.toFixed(2)} m`);
+}
+
+// --------------------------------------------------------------------------
 
 function main() {
   const argv = process.argv.slice(2);
@@ -441,9 +485,10 @@ function main() {
   const filterMode = argv.includes('--filter');
   const oracle = argv.includes('--oracle');
   const recapture = argv.includes('--recapture');
+  const shipped = argv.includes('--shipped');
   const pos = argv.filter((a) => !a.startsWith('--'));
   if (pos.length !== 2) {
-    console.error('Usage: node analysis/bidir-replay.js <profile.json> <roundtrip-session.jsonl> [--ridge] [--filter] [--oracle] [--recapture]');
+    console.error('Usage: node analysis/bidir-replay.js <profile.json> <roundtrip-session.jsonl> [--shipped] [--ridge] [--filter] [--oracle] [--recapture]');
     process.exit(1);
   }
   const profile = JSON.parse(fs.readFileSync(pos[0], 'utf8'));
@@ -451,11 +496,16 @@ function main() {
   console.log(`Profile: ${profile.route.venueId}/${profile.route.routeId}  Session: ${session.file}`);
   latchReport(profile, session);
   if (ridge) ridgeReport(profile, session);
+  if (shipped) shippedReport(profile, session);
   if (filterMode || oracle || recapture) {
+    console.log('\n!! --filter/--oracle/--recapture run the STALE DirectionalFilter parallel loop');
+    console.log('   (buggy perPointLogLikReverse §10, no replay() stabilizers). Use --shipped for');
+    console.log('   the honest Live-path number (bidirectional-route-tracking.md §13).');
     directionalReplay(profile, session, { latchMode: oracle ? 'oracle' : 'gyro', recapture });
   }
-  if (!ridge && !filterMode && !oracle && !recapture) {
-    console.log('\n(flags: --filter direction-aware replay · --oracle flip at true turnaround · --recapture reversed turn re-pin · --ridge raw-emission argmax dump)');
+  if (!ridge && !filterMode && !oracle && !recapture && !shipped) {
+    console.log('\n(flags: --shipped REAL replay() round-trip score [recommended] · --ridge raw-emission argmax dump ·');
+    console.log(' --filter/--oracle/--recapture SUPERSEDED stale parallel loop, see §13)');
   }
 }
 

@@ -706,3 +706,103 @@ the single weak segment). The bundled profile + parity fixture were updated to
 the fresh passes (6/6 parity still green). This is the real grounding: to-and-fro
 **does** work on the office once the profile is good; the recapture is what
 carries the weak segment on the return.
+
+## 13. CORRECTION #2: the 7.6 m was a STALE-HARNESS artifact — the SHIPPED filter does P50 3.26 m; the real blocker is the LIFECYCLE, not the math (2026-06-19)
+
+Re-measured the crisp-pivot round-trip through the **actual shipped path**
+(`grid-filter.js` `replay()` + the real `RouteGridFilter` class, which now carries
+the latch + −stride + reverse emission + reversed-turn recapture since commit
+`62f6fb7`) instead of `bidir-replay.js`'s `--filter` mode. **This closes the §8.3
+TODO** (drive the real `replay()`, not the parallel loop) and overturns the §12
+number.
+
+**Measured (shipped `replay()`, crisp-pivot, vs ARKit GT projected onto the
+outbound path — same GT as §11/§12):**
+- Forward leg: **P50 3.43 m / P75 5.21 m**
+- Return  leg: **P50 3.26 m / P75 6.29 m** — i.e. the return leg tracks *as well
+  as the forward leg*, NOT at 7.6 m.
+
+The latch engages cleanly: the −200° turnaround flips `returning` false→true
+(`revCursor`=2), and the three reversed-signature corners re-pin in order
+(−79°→1463, −90°→1219, −71°→514, `revCursor` 2→1→0→−1). The return trajectory is
+sub-4 m for most of the leg; the only blemish is one ~7 s excursion on weak
+segment 5 (t+76–84) where pOff saturates to 1.0 and the mean teleports back toward
+the end (bin ~1581, err ~28 m) — fully recovered by the −71° corner recapture
+(0.59 m immediately after). That single excursion is the entire P75 tail; the rest
+of the return is ~1–4 m.
+
+**Why §12's 7.59 m was wrong:** `bidir-replay.js --filter` runs a *stale parallel
+loop* (`DirectionalFilter` + `directionalReplay`) written BEFORE the logic was
+ported into the shipped class. It (a) uses `perPointLogLikReverse`, which still has
+the newest-first indexing bug §10 fixed in the shipped `perPointLogLik(...,reverse)`,
+and (b) lacks the shipped `replay()` stabilizers (mode-anchored OFF re-entry,
+terminal freeze, unobserved leak). **`bidir-replay.js`'s `--filter`/`--recapture`/
+`--oracle` numbers are superseded — use the shipped `replay()`.** (Its `latchReport`
+and `--ridge` building-block probes are still valid.)
+
+**THE REAL BLOCKER (lifecycle, proven):** the return leg only tracked because the
+crisp-pivot trace's **last forward checkpoint (Arcade/ATH) never fired** — the user
+U-turned ~2 m short of its decision zone (forward mean reached bin 1604; decision
+bin ~1640), so `checkpointStates.every(fired)` stayed false and the turnaround was
+delivered to `observeTurn`. **The typical to-and-fro — walk to the end, last
+checkpoint fires, THEN U-turn — is the BROKEN case**, because:
+- `grid-filter.js:924` skips ALL turn events once every checkpoint has fired
+  (`if (checkpointStates.every((cp) => cp.firedAt !== null)) continue;`), and
+- the Live controller is stricter still: `completeRoute()`
+  (`LivePositioningController.swift:508`) sets `isComplete=true`, `isRunning=false`,
+  stops the recorder and closes the trace; `handleDeviceMotion` bails on
+  `!isComplete` (L233). **Once the forward route completes, the Live filter is dead
+  — no steps, no turns, no chance to flip the latch.**
+
+Proof the guard is load-bearing: monkeypatching the turnaround U-turn to be dropped
+(simulating "all forward checkpoints fired ⇒ turn skipped") collapses the return
+leg from **P50 3.26 m → 18.89 m / P75 32.45 m** (belief stays pinned near the end
+barrier, never reverses). So the difference between a tracked and an untracked
+return leg is literally whether the terminus U-turn reaches `observeTurn`.
+
+**Reframed verdict:** the return-leg FILTER MATH is already good enough on a
+strong-profile route (≈ forward, ~3 m P50, within the 1–3 m band's upper edge and
+inside the ±5 m checkpoint gate except for one weak-segment excursion). **The thing
+standing between this and Live is not the math — it is that the decision path
+terminates filtering at forward completion.** The fix is a lifecycle change, not a
+filter change:
+1. After forward completion, do NOT tear down — enter a bounded "return watch":
+   keep the filter alive, keep feeding steps + turns.
+2. Deliver a terminus U-turn (≥140°, posterior at end) to `observeTurn` even
+   post-completion so it flips `returning` (today's guard suppresses exactly this).
+3. Once `returning`, the existing −stride + recapture track the return leg; pick a
+   §4 checkpoint policy (suppress, or re-fire "returning past X" with `P(s ≤ X)`).
+4. Guard against garbage: only enter return-tracking on a genuine end U-turn
+   followed by continued stepping; otherwise stop as today (a user who finishes and
+   stands still / walks off-route must still "complete").
+
+**Caveat (data gap):** this is ONE clean single out-and-back, and it sits in the
+lucky regime (last checkpoint unfired). The fix is proven *negatively* (suppressing
+the turnaround breaks it) but not yet demonstrated end-to-end on a trace where the
+forward leg fires ALL checkpoints and then U-turns — that trace does not exist
+(the 163708 round-trip is ~2 laps; the single-out-and-back GT mapper can't score
+it). The smallest unblocking recording: **one hand round-trip where the user fully
+enters the final checkpoint (so it fires) before the crisp U-turn**, to confirm the
+post-completion return-watch tracks the same ~3 m.
+
+**Committed this session (offline only; no device deploy):**
+- `analysis/bidir-replay.js --shipped` — drives the REAL `replay()` and scores
+  both legs vs ARKit (the honest 3.43 m / 3.26 m). The `--filter/--oracle/
+  --recapture` DirectionalFilter path is now banner-marked SUPERSEDED (it is the
+  source of the stale 7.59 m).
+- `grid-filter.js` `replay()` turn guard relaxed: after forward completion, a
+  terminus U-turn (≥`turnReversalMinDeg`) is still delivered to `observeTurn` so
+  the latch can flip post-completion (the offline mirror of the Live
+  return-watch). **Zero graded-metric regression** across the forward matrix
+  (Test-clean 3/3 P50 0.35, L478-clean 6/6 P50 0.34, LIS-fwd 7/7 P50 0.59,
+  pacing negatives still 0 fires — all identical; the only diff is post-route
+  turn-log lines + a post-route P(OFF) reflecting the now-observed surveyor
+  turn-around, off-route still not flagged). Verified: Test-clean's forward leg
+  fires all 3 checkpoints and its +192° end turn-around now flips the latch
+  post-completion — confirming the flip is reached even on a fully-completing
+  forward leg (what the crisp-pivot couldn't show). `npm test` parity green;
+  the parity fixture is unaffected (`make-parity-fixture.js` has its own loop
+  that already delivers all turns). **The remaining gap is purely the Live
+  `LivePositioningController.completeRoute()` teardown** (`:508`) — the Swift
+  controller still tears down at completion; the parallel return-watch change
+  there is offline-untestable and deferred to a device session.

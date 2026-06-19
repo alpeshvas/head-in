@@ -919,9 +919,18 @@ function replay(profile, session) {
         filter.applyUnobservedLeak();
       }
     } else if (ev.kind === 'turn') {
-      // Live stops at route completion; mirror that so the surveyor's
-      // end-of-recording turn-around is not scored as evidence.
-      if (checkpointStates.every((cp) => cp.firedAt !== null)) continue;
+      // Forward route done: a guided tour ends at the last checkpoint, so a
+      // surveyor's small post-route movements must not be scored as forward
+      // evidence. BUT a near-180° terminus U-turn after completion is the
+      // to-and-fro turnaround — it must still reach observeTurn so the
+      // `returning` latch can flip and the return leg can track
+      // (bidirectional-route-tracking.md §13: the pre-§13 unconditional skip
+      // here was the offline mirror of the Live `completeRoute()` teardown that
+      // killed return tracking). Once returning, deliver every turn so the
+      // reversed-signature corners can recapture. observeTurn's own terminus
+      // guard (§3.6c) still decides whether the flip actually happens.
+      const routeDone = checkpointStates.every((cp) => cp.firedAt !== null);
+      if (routeDone && !filter.returning && Math.abs(ev.deltaDeg) < PARAMS.turnReversalMinDeg) continue;
       const matched = filter.observeTurn(ev.deltaDeg);
       turnLog.push({ t: ev.t, deltaDeg: ev.deltaDeg, matched, support: filter.lastTurnSupport, pOffAfter: filter.pOff });
     } else {
