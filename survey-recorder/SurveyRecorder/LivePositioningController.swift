@@ -365,6 +365,21 @@ final class LivePositioningController {
         return magBuffer[lo].v + (magBuffer[hi].v - magBuffer[lo].v) * f
     }
 
+    /// In-place pacing detector: live field range over the last
+    /// confinementWindowSec, normalized by the venue's typical per-window range.
+    /// ≥ confinementFireMin means the walker is covering ground; below it the
+    /// field is confined to one patch (pacing) and checkpoint fires are blocked.
+    /// Returns .infinity when there is too little data to judge (don't gate).
+    private func confinementRatio(at timestamp: TimeInterval) -> Double {
+        let start = timestamp - FilterParams.confinementWindowSec
+        var lo = Double.infinity, hi = -Double.infinity, n = 0
+        for s in magBuffer where s.t >= start && s.t <= timestamp {
+            lo = min(lo, s.v); hi = max(hi, s.v); n += 1
+        }
+        if n < FilterParams.confinementMinSamples { return .infinity }
+        return (hi - lo) / max(gp.typicalWindowRange, 1e-6)
+    }
+
     // MARK: Posterior -> UI
 
     private func refreshOutputs(at timestamp: TimeInterval) {
@@ -392,6 +407,7 @@ final class LivePositioningController {
             let onRoute = max(1 - pOff, 1e-9)
             let fired = stepsSinceObservation <= FilterParams.observationRecencySteps
                 && !filter.reversalActive
+                && confinementRatio(at: timestamp) >= FilterParams.confinementFireMin
                 && filter.probBeyond(bin: cp.decisionBin) / onRoute > FilterParams.checkpointTau
                 && pOff < FilterParams.offRouteTau
             checkpointConsecutive = fired ? checkpointConsecutive + 1 : 0

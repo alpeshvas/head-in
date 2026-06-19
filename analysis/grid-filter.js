@@ -84,7 +84,37 @@ const PARAMS = {
   // Separates legit matches (≤2.8σ across all routes) from pacing U-turns that
   // coincide in magnitude with a route turn while the mean is 3.4σ+ away (Ravi).
   turnMatchMaxMeanSigma: 3.0,
+  // In-place pacing detector (non-filter firing gate). Pacing produces steps
+  // but no net displacement, so the live field stays confined to a small patch
+  // and varies far LESS than the venue's profile says it should over the ground
+  // a real walk covers. Measured venue-normalized over an 8 s window: forward
+  // walks cover ≥0.9× the profile's typical per-window field range at every
+  // venue (incl. weak-gradient office at 1.48×); pacing covers ≤0.70×. Below
+  // confinementFireMin, the walker is demonstrably not progressing — block
+  // checkpoint fires (belief/tracking untouched). Pure min/max over magnitude,
+  // so JS↔Swift identical (no turn-detector parity gap).
+  confinementWindowSec: 8,
+  confinementFireMin: 0.8,
+  confinementMinSamples: 30,
 };
+
+/** Median field-magnitude range over a ~stepsW-step window across the profile —
+ *  the venue's "typical per-window field variation" a real walk should cover. */
+function profileTypicalWindowRange(gp, stepsW = 6) {
+  const ranges = [];
+  for (const seg of gp.segments) {
+    if (seg.count < 10) continue;
+    const wbins = Math.max(8, Math.round(stepsW * seg.binsPerStep));
+    const end = seg.startBin + seg.count;
+    for (let i = seg.startBin; i + wbins <= end; i += Math.max(1, Math.round(wbins / 4))) {
+      let lo = Infinity, hi = -Infinity;
+      for (let j = i; j < i + wbins; j++) { if (gp.mean[j] < lo) lo = gp.mean[j]; if (gp.mean[j] > hi) hi = gp.mean[j]; }
+      ranges.push(hi - lo);
+    }
+  }
+  ranges.sort((a, b) => a - b);
+  return ranges.length ? ranges[Math.floor(ranges.length / 2)] : 1;
+}
 
 // ---------------------------------------------------------------------------
 // Session parsing (magnetic + user-acceleration + anchors + AR poses)
@@ -728,6 +758,24 @@ function replay(profile, session) {
   let observed = 0;
   let stepsSinceObservation = Infinity;
 
+  // In-place pacing gate: the live field range over the last confinementWindow,
+  // normalized by the venue's typical per-window field range. Below the floor,
+  // the walker is not covering ground — block fires. (session.dm[].mag is the
+  // magnitude.) See profileTypicalWindowRange / PARAMS.confinement*.
+  const profileRange = profileTypicalWindowRange(gp);
+  const confinementRatio = (t) => {
+    const W = PARAMS.confinementWindowSec;
+    let lo = Infinity, hi = -Infinity, n = 0;
+    for (const s of session.dm) {
+      if (s.t < t - W) continue;
+      if (s.t > t) break;
+      if (!Number.isFinite(s.mag)) continue;
+      if (s.mag < lo) lo = s.mag; if (s.mag > hi) hi = s.mag; n++;
+    }
+    if (n < PARAMS.confinementMinSamples) return Infinity; // too little data: don't gate
+    return (hi - lo) / Math.max(profileRange, 1e-6);
+  };
+
   // Terminal region: within one stride of the route end. Once essentially all
   // on-route mass is here, the magnetic emission has nothing left to
   // discriminate — live windows start to include post-route field and would
@@ -773,6 +821,7 @@ function replay(profile, session) {
       // events, and neither may progress made while the heading is unexplained.
       const ok = stepsSinceObservation <= PARAMS.observationRecencySteps
         && !filter.reversalActive()
+        && confinementRatio(ev.t) >= PARAMS.confinementFireMin
         && filter.probBeyond(cp.decisionBin) / Math.max(1 - pOff, 1e-9) > PARAMS.checkpointTau
         && pOff < 0.5;
       cp.consecutive = ok ? cp.consecutive + 1 : 0;

@@ -39,6 +39,14 @@ enum FilterParams {
     // filter must believe the walker is AT the turn). Rejects pacing U-turns
     // that coincide in magnitude with a route turn while the mean is 3σ+ away.
     static let turnMatchMaxMeanSigma = 3.0
+    // In-place pacing firing gate (controller-level). Below confinementFireMin,
+    // the live field over confinementWindowSec varies less than confinementFireMin
+    // × the venue's typical per-window range → the walker is not covering ground
+    // (pacing) → block checkpoint fires. Pure magnitude min/max, so JS↔Swift
+    // identical. Forward walks measured ≥0.9× at every venue; pacing ≤0.70×.
+    static let confinementWindowSec = 8.0
+    static let confinementFireMin = 0.8
+    static let confinementMinSamples = 30
 }
 
 /// All profile segments concatenated onto one global bin axis.
@@ -65,6 +73,10 @@ struct GlobalRouteProfile {
     let diffSigmaUT: Double
     let offLogLikPerPoint: Double
     let bins: Int
+    /// Median field-magnitude range over a ~6-step window across the route — the
+    /// venue's typical per-window field variation a real walk should cover. The
+    /// in-place pacing gate normalizes the live window range by this.
+    let typicalWindowRange: Double
 
     init(profile: RouteProfile) throws {
         var mean: [Double] = []
@@ -96,6 +108,24 @@ struct GlobalRouteProfile {
         self.std = std
         self.segments = segments
         self.bins = mean.count
+
+        // Profile's typical per-window field range (median over ~6-step windows).
+        var ranges: [Double] = []
+        let stepsW = 6.0
+        for seg in segments where seg.count >= 10 {
+            let wbins = max(8, Int((stepsW * seg.binsPerStep).rounded()))
+            let end = seg.startBin + seg.count
+            var i = seg.startBin
+            let stride = max(1, wbins / 4)
+            while i + wbins <= end {
+                var lo = Double.infinity, hi = -Double.infinity
+                for j in i..<(i + wbins) { lo = min(lo, mean[j]); hi = max(hi, mean[j]) }
+                ranges.append(hi - lo)
+                i += stride
+            }
+        }
+        ranges.sort()
+        self.typicalWindowRange = ranges.isEmpty ? 1 : ranges[ranges.count / 2]
 
         var checkpoints: [(String, Int, Int)] = []
         for seg in segments {
