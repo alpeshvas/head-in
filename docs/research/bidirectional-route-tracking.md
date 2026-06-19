@@ -709,6 +709,12 @@ carries the weak segment on the return.
 
 ## 13. CORRECTION #2: the 7.6 m was a STALE-HARNESS artifact — the SHIPPED filter does P50 3.26 m; the real blocker is the LIFECYCLE, not the math (2026-06-19)
 
+> ⚠️ **The metre numbers in §13 and §14 are GT-inflated ~2× — see §15.** The
+> shipped-path *behavior* (latch engages, recaptures fire, lifecycle is the
+> blocker) is correct, but the harness ground truth (`buildTrueBinMapper`) used a
+> single-average bins-per-metre scale that inflated errors ~2×. Corrected
+> per-segment numbers: forward **0.71 m**, return **1.70 m**, triggers **6/7**.
+
 Re-measured the crisp-pivot round-trip through the **actual shipped path**
 (`grid-filter.js` `replay()` + the real `RouteGridFilter` class, which now carries
 the latch + −stride + reverse emission + reversed-turn recapture since commit
@@ -808,6 +814,12 @@ post-completion return-watch tracks the same ~3 m.
 
 ## 14. The decision metric is harsher than the position metric: return TRIGGERS are 4/7 within ±5 m (2026-06-20)
 
+> ⚠️ **Superseded by §15: with corrected per-segment GT the return is 6/7, not
+> 4/7, and ~1.7 m, not ~3 m.** The §14 *mechanism* (mid-route checkpoints around
+> seg5 are the weak spot; corners pass, mid-span lags) holds, but the magnitudes
+> below are GT-inflated, and "stride is the root cause" was wrong (§15: stride-norm
+> refuted with the oracle stride; the gap was mostly the GT artifact).
+
 §13's headline (return P50 3.26 m) measures *position*. The commercial gate
 (STATUS L104 / SYNTHESIS) is **≥90 % checkpoint triggers within ±5 m** — a
 *decision* metric. Measured the return-leg trigger accuracy directly: drive the
@@ -896,3 +908,61 @@ would settle whether to-and-fro triggering is fundamentally fine and only needs 
 §13 lifecycle change (likely — corner recaptures + good emission, no anomalous
 segment), or whether the mid-segment trigger problem generalizes beyond LIS's seg5.
 On the available LIS data the two are confounded.
+
+## 15. CORRECTION #3 (verdict-flip): the §13/§14 numbers were GROUND-TRUTH-inflated ~2× — the return leg is ~1.7 m P50, 6/7 triggers (2026-06-20)
+
+Investigating §14's stride hypothesis surfaced a measurement bug that contaminated
+**every return number from §8 onward.** The harness ground truth
+(`bidir-replay.js` `buildTrueBinMapper`) folded ARKit cumulative arc with a
+**single average bins-per-metre scale** (`outboundArc/(bins-1)`) instead of the
+**per-segment** anchor-to-anchor scale that `metersMapper` already computes from
+the survey's anchor taps. Segments differ in metres-per-bin, so the single scale
+mis-measures position.
+
+**Proof (same trace, same filter, two GTs):** the FORWARD leg scores **3.43 m**
+under the single-scale GT but **0.71 m** under the per-segment GT — and 0.71 m
+matches the independent leave-one-out (§12, 0.69–0.91 m). So the per-segment GT is
+right and the single-scale GT inflated ~2–5×.
+
+**Corrected numbers (per-segment GT, shipped `replay()`, crisp-pivot round-trip):**
+| metric | §13/§14 (inflated) | §15 (corrected) |
+|---|---|---|
+| Forward leg P50 / P75 | 3.43 / 5.21 m | **0.71 / 1.43 m** |
+| Return leg P50 / P75 | 3.26 / 6.29 m | **1.70 / 2.03 m** |
+| Return triggers ±5 m | 4/7 | **6/7** |
+
+The only failing return trigger is **Finance (8.5 m)**, the one mid-route checkpoint
+deepest in the seg5 / long-recapture-gap region; the other six are 0.4–4.6 m.
+
+**What this does to the §14 conclusions:**
+- "Position-good but trigger-marginal (4/7)" → the return is **in the 1–3 m band
+  (1.70 m) and 6/7 triggers (86 %)** — a hair under the 90 % gate, one marginal
+  checkpoint, on a single weak-venue trace. Much closer to GO.
+- "Stride/emission coupling is the Phase-4 root cause" → **refuted.** Stride-norm
+  with the *oracle* live stride did NOT lift the match (2/68 → 1/68); the apparent
+  stride effect was the GT artifact. The argmax probes also used a "within 1.5
+  strides ≈ 1 m" threshold *tighter than the venue's own tracking accuracy*, so
+  they read as 0/N regardless.
+- The reverse machinery (reverse emission + recapture + motion prior) **genuinely
+  works**: ~1.7 m return on a real round-trip vs ARKit.
+
+**Re-grounded verdict:** to-and-fro return tracking is **good** on the office (≈1.7 m
+P50, 6/7 triggers). The single load-bearing blocker is the **Live lifecycle
+teardown** (§13: `completeRoute()` kills the filter before the turnaround can flip
+the latch) — offline-fixed in `replay()`, device-deploy pending. Finance is one
+marginal mid-route checkpoint, fully covered by the **uncheck-on-return** reframe
+(treat the return as a low-stakes progress retreat, not ±5 m re-firing — §4-C/A):
+unchecking does not need ±5 m, and a slightly-late Finance retreat is harmless.
+
+**Fixed in the harness:** `buildTrueBinMapper` now uses the per-segment
+`metersMapper` scale (fallback to single-scale only when anchors are absent), and
+`--shipped` scores in metres via `binToMeters`/`trueMetersAt`. Re-run any §8–§14
+metric through `--shipped` before citing it.
+
+**Lesson (third time this exact class of bug):** §8.2 was a stale *profile*, §13 was
+a stale *harness loop*, §15 is a loose *ground truth*. Every "weak/marginal" verdict
+on this problem has so far been a measurement artifact, not a venue/algorithm limit.
+Validate the measurement chain (profile, harness path, ground-truth scale) before
+concluding the algorithm is the problem. The remaining genuine unknowns are small:
+the Live lifecycle wiring (device) and whether 6/7 → 7/7 needs a landmark in seg5
+or just the uncheck reframe (a strong-route round-trip would confirm).

@@ -32,7 +32,7 @@
 const fs = require('fs');
 const {
   buildGlobalProfile, parseSession, detectSteps, makeWindowProvider,
-  segmentOfBin, perPointLogLik, PARAMS, replay,
+  segmentOfBin, perPointLogLik, PARAMS, replay, metersMapper,
 } = require('./grid-filter.js');
 const { detectTurns } = require('./turn-events.js');
 const { buildArcLength } = require('./ground-truth.js');
@@ -44,16 +44,25 @@ const UTURN_MIN_DEG = 140;   // a reversal is near-180; route corners here are <
 // legs of a single out-and-back.
 
 /**
- * Build a mapper from time -> true route bin for a SINGLE out-and-back.
+ * Build a mapper from time -> true route position for a SINGLE out-and-back.
  *
  * A square route makes displacement-from-start useless (it dips/rises as you
  * round corners), so the turnaround is found from the GYRO U-TURN (the only
  * >=UTURN_MIN_DEG rotation), which is unambiguous and is the leg split point.
  *
- * True bin uses ARKit CUMULATIVE arc length (monotonic, drift-tolerant):
- *  - forward leg: bin 0..bins-1 as outbound arc goes 0..arcAtTurn.
- *  - return leg: a retrace, so bin decreases bins-1..0 as the distance walked
- *    back (arcNow - arcAtTurn) grows, using the same metres-per-bin scale.
+ * GROUND TRUTH SCALE (bidirectional-route-tracking.md §15): the bin<->meters
+ * mapping is PER-SEGMENT (metersMapper, from the actual anchor taps), NOT a single
+ * average bins-per-metre over the whole leg. A single-scale fold inflated the error
+ * ~2x (forward leg measured 3.43 m under the single scale vs 0.71 m under the
+ * per-segment scale, the latter matching the independent leave-one-out) — and that
+ * artifact contaminated every §8-§14 return number. With all anchors tapped
+ * (an out-and-back taps them on the way out), metersMapper is available; fall back
+ * to the old single-scale fold only when anchors are missing.
+ *
+ *  - forward leg: true route metres = cumulative ARKit arc from the start.
+ *  - return leg: a retrace, so route metres = outboundMetres - (distance retraced).
+ * `trueMetersAt`/`binToMeters` are the per-segment-accurate primitives; score in
+ * METRES (|binToMeters(meanBin) - trueMetersAt(t)|), not bins x average scale.
  *
  * Requires exactly one U-turn; warns and returns null otherwise.
  */
@@ -76,19 +85,34 @@ function buildTrueBinMapper(session, gp) {
   const tEnd = session.dm[session.dm.length - 1].t;
   const arcEnd = arc.lengthAt(tEnd) - arcStart;         // total path length (out + back)
   const returnArc = arcEnd - arcAtTurn;                 // return path length
-  const metresPerBin = arcAtTurn / Math.max(gp.bins - 1, 1);
+
+  // Per-segment scale (the fix). metersMapper measures route METRES from the
+  // start via cumulative ARKit arc, and maps metres<->bin per segment.
+  const mm = metersMapper(session, gp);
+  const singleMetresPerBin = arcAtTurn / Math.max(gp.bins - 1, 1); // fallback only
+  const outboundMetres = mm ? mm.truthMetersAt(turnT) : arcAtTurn;
+
+  function trueMetersAt(t) {
+    if (mm) {
+      if (t <= turnT) return mm.truthMetersAt(t);
+      const back = mm.truthMetersAt(t) - outboundMetres;   // distance retraced
+      return Math.max(0, outboundMetres - back);
+    }
+    // fallback: single-scale (old behavior) expressed in metres
+    const a = arc.lengthAt(t) - arcStart;
+    return t <= turnT ? a : Math.max(0, arcAtTurn - (a - arcAtTurn));
+  }
 
   return {
     turnT,
     outboundArc: arcAtTurn,
     returnArc,
+    mm,
+    trueMetersAt,
+    binToMeters: mm ? mm.binToMeters : (bin) => bin * singleMetresPerBin,
     trueBinAt(t) {
-      const a = arc.lengthAt(t) - arcStart;
-      if (t <= turnT) {
-        return Math.min(gp.bins - 1, (a / Math.max(arcAtTurn, 1e-9)) * (gp.bins - 1));
-      }
-      const back = a - arcAtTurn;                       // distance retraced
-      return Math.max(0, (gp.bins - 1) - back / Math.max(metresPerBin, 1e-9));
+      const metres = trueMetersAt(t);
+      return mm ? mm.metersToBin(metres) : Math.min(gp.bins - 1, Math.max(0, metres / Math.max(singleMetresPerBin, 1e-9)));
     },
     isReturn(t) { return t > turnT; },
   };
@@ -443,20 +467,20 @@ function directionalReplay(profile, session, { latchMode = 'gyro', recapture = f
 //
 // This SUPERSEDES the DirectionalFilter `--filter/--recapture/--oracle` path
 // above: that runs a stale parallel loop with the known-buggy
-// perPointLogLikReverse (§10) and no stabilizers, which is why it reported
-// 7.59 m where this reports ~3.26 m. Use --shipped for the honest number.
+// perPointLogLikReverse (§10) and no stabilizers. Scores in METRES via the
+// per-segment ground truth (§15) — the single-average-scale fold inflated these
+// ~2x in §13/§14.
 function shippedReport(profile, session) {
   const gp = buildGlobalProfile(profile);
   const gt = buildTrueBinMapper(session, gp);
   if (!gt) { console.log('No ARKit ground truth / not a single out-and-back — cannot score.'); return; }
   const t0 = session.anchors.length ? session.anchors[0].t : session.dm[0].t;
   const r = replay(profile, session);
-  const mpb = gt.outboundArc / Math.max(gp.bins - 1, 1);
 
   // Latch + recapture trace (turnLog carries every observed turn; while
   // returning, a matched turn IS a reversed-signature corner recapture).
   console.log(`\n=== SHIPPED replay() round-trip (the Live-path filter) ===`);
-  console.log(`turnaround t+${(gt.turnT - t0).toFixed(1)}s  outboundArc ${gt.outboundArc.toFixed(1)}m  returnArc ${gt.returnArc.toFixed(1)}m`);
+  console.log(`turnaround t+${(gt.turnT - t0).toFixed(1)}s  outboundArc ${gt.outboundArc.toFixed(1)}m  returnArc ${gt.returnArc.toFixed(1)}m  GT=${gt.mm ? 'per-segment' : 'single-scale(fallback)'}`);
   const fired = r.checkpointStates.filter((c) => c.firedAt !== null).length;
   console.log(`forward checkpoints fired: ${fired}/${r.checkpointStates.length}` +
     (fired < r.checkpointStates.length ? '  (last unfired — see §13 lifecycle note)' : ''));
@@ -465,10 +489,11 @@ function shippedReport(profile, session) {
     console.log(`  turn t+${(tl.t - t0).toFixed(1)}s  ${tl.deltaDeg > 0 ? '+' : ''}${tl.deltaDeg.toFixed(0)}° -> ${tl.matched ? 'MATCH' : 'unmatched'}  pOff ${tl.pOffAfter.toFixed(2)}`);
   }
 
+  // Score in METRES with the per-segment scale (§15): |binToMeters(meanBin) - trueMetresAt|.
   const fwd = [], ret = [];
   for (const row of r.timeline) {
     if (row.kind !== 'step') continue;
-    const err = Math.abs(row.meanBin - gt.trueBinAt(row.t)) * mpb;
+    const err = Math.abs(gt.binToMeters(row.meanBin) - gt.trueMetersAt(row.t));
     (gt.isReturn(row.t) ? ret : fwd).push(err);
   }
   const pct = (a, p) => { if (!a.length) return NaN; const s = a.slice().sort((x, y) => x - y); return s[Math.floor(p * (s.length - 1))]; };
