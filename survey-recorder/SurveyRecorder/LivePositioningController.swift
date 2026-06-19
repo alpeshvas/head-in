@@ -20,8 +20,20 @@ final class LivePositioningController {
     /// traced back to a real route turn.
     var livePose = DevicePose.hand
 
+    /// Display-only checkpoint labels, bridged from the survey registry when a
+    /// route with the same venue/route and the same number of anchors exists.
+    /// `nil` → use the bundled profile's names. NEVER written to traces or meta
+    /// (those keep the canonical profile names so offline analysis stays
+    /// consistent with the bundled profile). Names don't affect matching.
+    var checkpointDisplayNames: [String]?
+
     private(set) var isRunning = false
     private(set) var isComplete = false
+    // Forward route done (all checkpoints fired) but the run is kept ALIVE so a
+    // U-turn can flip the direction latch and the return leg can be tracked
+    // (bidirectional-route-tracking.md §13/§15: completeRoute() used to tear the
+    // filter down here, killing return tracking before the turnaround was seen).
+    private(set) var forwardComplete = false
     private(set) var statusText = "Ready"
     private(set) var totalSampleCount = 0
     private(set) var detectedSteps = 0
@@ -79,13 +91,41 @@ final class LivePositioningController {
 
     // MARK: View-facing derivations
 
+    /// Override-aware label for anchor `index` (0 = start). Uses a bridged
+    /// registry name only when a same-length override is set; otherwise the
+    /// `fallback` (when given) or the canonical profile anchor name.
+    func anchorDisplayName(_ index: Int, fallback: String? = nil) -> String {
+        if let names = checkpointDisplayNames, names.count == profile.anchors.count,
+           index >= 0, index < names.count {
+            return names[index]
+        }
+        if let fallback { return fallback }
+        guard index >= 0, index < profile.anchors.count else { return "" }
+        return profile.anchors[index].name
+    }
+
+    private var hasNameOverride: Bool {
+        checkpointDisplayNames?.count == profile.anchors.count
+    }
+
     var currentSegmentLabel: String {
-        isComplete ? "Route complete" : gp.segment(ofBin: Int(displayBin)).fromToLabel
+        if isComplete { return "Route complete" }
+        let seg = gp.segment(ofBin: Int(displayBin))
+        // Segment k spans anchor k → anchor k+1. Only rebuild from overrides
+        // when active; otherwise keep the profile's exact from→to label.
+        guard hasNameOverride, seg.index + 1 < profile.anchors.count else {
+            return seg.fromToLabel
+        }
+        return "\(anchorDisplayName(seg.index)) → \(anchorDisplayName(seg.index + 1))"
     }
 
     var nextCheckpoint: String {
         guard reachedCheckpoints < gp.checkpoints.count else { return "Done" }
-        return gp.checkpoints[reachedCheckpoints].name
+        // gp.checkpoints[k] is the destination of segment k = anchor k+1.
+        guard hasNameOverride, reachedCheckpoints + 1 < profile.anchors.count else {
+            return gp.checkpoints[reachedCheckpoints].name
+        }
+        return anchorDisplayName(reachedCheckpoints + 1)
     }
 
     var activeSegmentPosition: Int { reachedCheckpoints }
@@ -101,7 +141,7 @@ final class LivePositioningController {
     }
 
     var limitationCopy: String {
-        "Prototype route mode: stand at \(profile.anchors.first?.name ?? "Start"), tap Start/Reset, then walk the surveyed route with the phone in hand. It estimates progress on this route only; it is not arbitrary indoor GPS."
+        "Prototype route mode: stand at \(anchorDisplayName(0, fallback: profile.anchors.first?.name ?? "Start")), tap Start/Reset, then walk the surveyed route with the phone in hand. It estimates progress on this route only; it is not arbitrary indoor GPS."
     }
 
     // MARK: Lifecycle
@@ -129,6 +169,7 @@ final class LivePositioningController {
         reachedCheckpoints = 0
         checkpointConsecutive = 0
         isComplete = false
+        forwardComplete = false
         isRunning = true
         lastAdvanceReason = nil
         lastTurnLabel = nil
@@ -145,7 +186,7 @@ final class LivePositioningController {
         stepDetector.reset()
         turnDetector.reset()
         resetMotionClassifier()
-        statusText = "Starting at \(profile.anchors.first?.name ?? "Start")"
+        statusText = "Starting at \(anchorDisplayName(0, fallback: profile.anchors.first?.name ?? "Start"))"
 
         // Every live run writes a trace (sensors + filter state + events) into the
         // Sessions list — replayable offline and diffable against the JS filter.
@@ -365,10 +406,29 @@ final class LivePositioningController {
         return magBuffer[lo].v + (magBuffer[hi].v - magBuffer[lo].v) * f
     }
 
+    /// In-place pacing detector: live field range over the last
+    /// confinementWindowSec, normalized by the venue's typical per-window range.
+    /// ≥ confinementFireMin means the walker is covering ground; below it the
+    /// field is confined to one patch (pacing) and checkpoint fires are blocked.
+    /// Returns .infinity when there is too little data to judge (don't gate).
+    private func confinementRatio(at timestamp: TimeInterval) -> Double {
+        let start = timestamp - FilterParams.confinementWindowSec
+        var lo = Double.infinity, hi = -Double.infinity, n = 0
+        for s in magBuffer where s.t >= start && s.t <= timestamp {
+            lo = min(lo, s.v); hi = max(hi, s.v); n += 1
+        }
+        if n < FilterParams.confinementMinSamples { return .infinity }
+        return (hi - lo) / max(gp.typicalWindowRange, 1e-6)
+    }
+
     // MARK: Posterior -> UI
 
     private func refreshOutputs(at timestamp: TimeInterval) {
         let meanBin = filter.meanBin
+        // In-place pacing: the live field is confined to one patch, so the walker
+        // is not covering ground. Blocks fires AND freezes the displayed position
+        // (the belief still marches on step count, but we must not show progress).
+        let confined = confinementRatio(at: timestamp) < FilterParams.confinementFireMin
         pOff = filter.pOff
         posteriorStdBins = filter.beliefStdDev
 
@@ -392,6 +452,7 @@ final class LivePositioningController {
             let onRoute = max(1 - pOff, 1e-9)
             let fired = stepsSinceObservation <= FilterParams.observationRecencySteps
                 && !filter.reversalActive
+                && !confined
                 && filter.probBeyond(bin: cp.decisionBin) / onRoute > FilterParams.checkpointTau
                 && pOff < FilterParams.offRouteTau
             checkpointConsecutive = fired ? checkpointConsecutive + 1 : 0
@@ -403,8 +464,15 @@ final class LivePositioningController {
                 traceWriter?.flush()
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 if reachedCheckpoints == gp.checkpoints.count {
-                    completeRoute()
-                    return
+                    // Forward route done — but DON'T tear down (that was the §13
+                    // blocker). Keep the filter, recorder and motion stream alive so
+                    // a U-turn at the end flips the `returning` latch and the return
+                    // leg tracks (−stride + reverse emission + reversed-turn
+                    // recapture, already in RouteBeliefFilter). The run ends on
+                    // manual Stop. (§15: return leg tracks ~1.7 m, 6/7 on replay.)
+                    forwardComplete = true
+                    lastAdvanceReason = "Route complete — U-turn to walk back"
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
                 }
             }
         }
@@ -413,10 +481,20 @@ final class LivePositioningController {
         // but the posterior mean can lag it or even slip backward. The segment card
         // and progress rings must never contradict the timeline, so the displayed
         // bin is floored at the first bin past the last reached checkpoint.
-        let floorBin = reachedCheckpoints > 0
+        // While returning, the displayed position must be free to RETREAT toward
+        // the start, so the forward checkpoint floor is dropped (§15). Forward, the
+        // floor still prevents the card/rings from contradicting the timeline.
+        let floorBin = (reachedCheckpoints > 0 && !filter.returning)
             ? Double(min(gp.checkpoints[reachedCheckpoints - 1].bin + 1, gp.bins - 1))
             : 0
-        displayBin = max(meanBin, floorBin)
+        // While confined (pacing) the belief marches on raw step count, but the
+        // walker isn't progressing — hold the displayed bin so the segment card
+        // and rings don't creep forward. Floor (last fired checkpoint) still wins.
+        if confined {
+            displayBin = max(floorBin, displayBin)
+        } else {
+            displayBin = max(meanBin, floorBin)
+        }
         let seg = gp.segment(ofBin: Int(displayBin))
         globalProgress = displayBin / Double(max(gp.bins - 1, 1))
         segmentProgress = min(1, max(0, (displayBin - Double(seg.startBin)) / Double(max(seg.count - 1, 1))))
@@ -425,6 +503,17 @@ final class LivePositioningController {
             statusText = "Off route?"
         } else if motionMode != .walking {
             statusText = pausedMotionStatusText
+        } else if filter.returning {
+            // Direction latch engaged: the user U-turned at the route end and is
+            // walking back. Checkpoint fires are suppressed (reversalActive); we
+            // surface the state rather than silently mis-track the return leg
+            // (bidirectional-route-tracking.md §4-C).
+            statusText = "Returning"
+        } else if forwardComplete {
+            // Forward route done, latch not yet flipped: prompt the to-and-fro test.
+            statusText = "Route complete · U-turn to walk back"
+        } else if confined {
+            statusText = "Holding position"
         } else if reachedCheckpoints < gp.checkpoints.count,
                   filter.probBeyond(bin: gp.checkpoints[reachedCheckpoints].decisionBin) > 0.4 {
             statusText = "Near \(gp.checkpoints[reachedCheckpoints].name)"

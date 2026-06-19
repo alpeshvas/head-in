@@ -24,12 +24,15 @@ struct RouteProfile: Decodable {
         ("Plumeria", "plumeria-test-forward"),
         ("Plumeria L478", "plumeria-l478-forward"),
         ("Plumeria L478 (pocket)", "plumeria-l478-pocket"),
+        ("Office right wing", "office-right-wing-forward"),
+        ("Office-Near (LIS)", "office-near-lis-forward"),
+        ("Ravi-place (Home)", "ravi-place-home-forward"),
         ("Meadows", "meadows-test-forward"),
     ]
 
     static func loadBundled(resource: String) throws -> RouteProfile {
         guard let url = Bundle.main.url(forResource: resource, withExtension: "json") else {
-            throw RouteProfileError.missingBundledProfile
+            throw RouteProfileError.missingBundledProfile(resource)
         }
 
         let data = try Data(contentsOf: url)
@@ -116,15 +119,15 @@ struct MagneticMagnitudeProfile: Decodable {
 }
 
 enum RouteProfileError: LocalizedError {
-    case missingBundledProfile
+    case missingBundledProfile(String)
     case unsupportedSchema(Int)
     case emptyProfile
     case noMatchingSegments
 
     var errorDescription: String? {
         switch self {
-        case .missingBundledProfile:
-            return "The Meadows route profile is missing from this build."
+        case .missingBundledProfile(let resource):
+            return "Profile “\(resource).json” is not bundled in this build (run xcodegen generate after adding it)."
         case .unsupportedSchema(let schema):
             return "Unsupported route profile schema \(schema)."
         case .emptyProfile:

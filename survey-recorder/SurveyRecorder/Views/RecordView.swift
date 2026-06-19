@@ -6,12 +6,18 @@ struct RecordView: View {
     let onDismiss: () -> Void
 
     @State private var confirmStop = false
+    @State private var pendingName = ""
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
         VStack(spacing: 24) {
             header
             Spacer()
-            anchorButton
+            if controller.isAdHoc {
+                adHocCheckpointControls
+            } else {
+                anchorButton
+            }
             undoButton
             Spacer()
             liveStats
@@ -19,6 +25,48 @@ struct RecordView: View {
         }
         .padding()
         .interactiveDismissDisabled()
+    }
+
+    private var adHocCheckpointControls: some View {
+        VStack(spacing: 12) {
+            TextField("Next checkpoint name (optional)", text: $pendingName)
+                .textFieldStyle(.roundedBorder)
+                .autocorrectionDisabled()
+                .submitLabel(.done)
+                .focused($nameFocused)
+                .onSubmit { nameFocused = false }
+
+            Button {
+                nameFocused = false
+                controller.dropCheckpoint(pendingName: pendingName)
+                pendingName = ""
+            } label: {
+                VStack(spacing: 8) {
+                    Image(systemName: "mappin.and.ellipse")
+                        .font(.system(size: 40))
+                    Text("Drop checkpoint")
+                        .font(.title2.bold())
+                    Text(pendingName.trimmingCharacters(in: .whitespaces).isEmpty
+                        ? "Auto-named “Checkpoint \(controller.anchorCount + 1)”"
+                        : "Named “\(pendingName.trimmingCharacters(in: .whitespaces))”")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 180)
+            }
+            .buttonStyle(.borderedProminent)
+
+            if !controller.recordedCheckpoints.isEmpty {
+                Text(controller.recordedCheckpoints.enumerated()
+                    .map { "\($0.offset + 1). \($0.element)" }
+                    .joined(separator: "   "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
     }
 
     private var header: some View {
@@ -77,7 +125,9 @@ struct RecordView: View {
 
     private var liveStats: some View {
         VStack(spacing: 6) {
-            Text("Anchored \(controller.anchorCount)/\(controller.setup.checkpoints.count)")
+            Text(controller.isAdHoc
+                ? "Dropped \(controller.anchorCount)"
+                : "Anchored \(controller.anchorCount)/\(controller.setup.checkpoints.count)")
                 .font(.title3.monospacedDigit())
 
             HStack(spacing: 16) {
