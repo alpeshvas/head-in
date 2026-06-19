@@ -61,14 +61,18 @@ struct RouteMapView: View {
                         pathShape(through: lo...hi, t: t)
                             .stroke(state.color.opacity(0.35), style: .init(lineWidth: 9, lineCap: .round, lineJoin: .round))
                     }
-                    // checkpoints
+                    // numbered checkpoint badges (names go in the legend below so
+                    // long text can never spill the map). Centre is clamped so a
+                    // badge at the edge stays fully inside the frame.
                     ForEach(Array(pathData.checkpoints.enumerated()), id: \.offset) { idx, cp in
                         let reached = idx <= controller.reachedCheckpoints
-                        Circle()
-                            .fill(reached ? Color.green : Color(.systemBackground))
-                            .overlay(Circle().stroke(reached ? Color.green : Color.secondary, lineWidth: 1.5))
-                            .frame(width: 9, height: 9)
-                            .position(t(cp.x, cp.z))
+                        Text("\(idx + 1)")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 16, height: 16)
+                            .background(Circle().fill(reached ? Color.green : Color.secondary))
+                            .overlay(Circle().stroke(.white, lineWidth: 1))
+                            .position(clamped(t(cp.x, cp.z), in: geo.size, inset: 9))
                     }
                     // current position marker (only while running)
                     if controller.isRunning || controller.isComplete {
@@ -76,16 +80,42 @@ struct RouteMapView: View {
                         Circle().fill(state.color)
                             .frame(width: 13, height: 13)
                             .overlay(Circle().stroke(.white, lineWidth: 2))
-                            .position(p)
+                            .position(clamped(p, in: geo.size, inset: 7))
                     }
                 }
             }
             .frame(height: 170)
             .background(Color(.secondarySystemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            // Legend: number -> checkpoint name. Wraps to as many rows as needed;
+            // names truncate inside their cell so big text never spills the map.
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 116), spacing: 6, alignment: .leading)],
+                      alignment: .leading, spacing: 4) {
+                ForEach(Array(pathData.checkpoints.enumerated()), id: \.offset) { idx, cp in
+                    let reached = idx <= controller.reachedCheckpoints
+                    HStack(spacing: 5) {
+                        Text("\(idx + 1)")
+                            .font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                            .frame(width: 15, height: 15)
+                            .background(Circle().fill(reached ? Color.green : Color.secondary))
+                        Text(cp.name)
+                            .font(.caption2)
+                            .foregroundStyle(reached ? .primary : .secondary)
+                            .lineLimit(1).truncationMode(.tail)
+                    }
+                }
+            }
             Text("Position constrained to surveyed path · band = ±2σ along route")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
+    }
+
+    /// Keep a point at least `inset` from every edge so a marker/badge centred
+    /// there stays fully inside the map frame.
+    private func clamped(_ p: CGPoint, in size: CGSize, inset: CGFloat) -> CGPoint {
+        CGPoint(x: min(max(p.x, inset), size.width - inset),
+                y: min(max(p.y, inset), size.height - inset))
     }
 
     // MARK: geometry
