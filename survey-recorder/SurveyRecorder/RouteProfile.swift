@@ -26,6 +26,7 @@ struct RouteProfile: Decodable {
         ("Plumeria L478 (pocket)", "plumeria-l478-pocket"),
         ("Office right wing", "office-right-wing-forward"),
         ("Office-Near (LIS)", "office-near-lis-forward"),
+        ("Ravi-place (Home)", "ravi-place-home-forward"),
         ("Meadows", "meadows-test-forward"),
     ]
 

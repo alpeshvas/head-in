@@ -48,6 +48,13 @@ the same path, don't backtrack.
 - Avoid mixing a slow exploratory pass with fast clean ones — the outlier drags
   down repeatability (the original 3-pass LIS included a 114 s ad-hoc pass and
   scored worse than the later 2 consistent passes).
+- **The ad-hoc bootstrap pass (pass 1) is NOT a survey pass — exclude it from the
+  build.** Dropping-and-naming checkpoints makes pass 1 slow and uneven (pauses
+  while typing), so its magnetic trace doesn't match the natural-pace reuse
+  passes. Treat pass 1 purely as the checkpoint-naming step; build the
+  fingerprint from the faster predefined-reuse passes (2+). Evidence: Ravi-place
+  pass 1 (82 s, ad-hoc) made the back half weak (r 0.22 / −0.02); rebuilding from
+  the two reuse passes (51 s, 43 s) made the same segments strong (r 0.88 / 0.85).
 
 ### 5. Turn on ARKit ground truth; hold the phone so the camera sees the space
 GT enables true-meter scoring and per-venue calibration fitting from arc length.
