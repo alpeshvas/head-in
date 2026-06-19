@@ -98,12 +98,13 @@ final class ParticleFilter2D {
         normalize()
     }
 
-    func predictStep(gyroDeltaRadians: Double) {
+    func predictStep(gyroDeltaRadians: Double, turnSignalRadians: Double? = nil) {
+        let turnSignalRadians = turnSignalRadians ?? gyroDeltaRadians
         lastTurnYawRadians = gyroDeltaRadians
         lastTurnRecoveryParticleCount = 0
         let previousEstimate = estimate.point
         let previousHeading = weightedMeanHeading()
-        let headingSigma = predictionHeadingSigma(for: gyroDeltaRadians)
+        let headingSigma = predictionHeadingSigma(for: turnSignalRadians)
         for i in particles.indices {
             let old = particles[i]
             let heading = old.headingRadians + gyroDeltaRadians + rng.normal(mean: 0, sigma: headingSigma)
@@ -115,7 +116,7 @@ final class ParticleFilter2D {
             if crossesWall(from: MapPoint2D(x: old.x, y: old.y), to: MapPoint2D(x: nx, y: ny)) { weight *= ParticleFilter2DParams.wallPenalty }
             particles[i] = Particle2D(x: nx, y: ny, headingRadians: heading, weight: weight, previousX: old.x, previousY: old.y)
         }
-        injectTurnRecoveryParticles(from: previousEstimate, previousHeading: previousHeading, gyroDeltaRadians: gyroDeltaRadians)
+        injectTurnRecoveryParticles(from: previousEstimate, previousHeading: previousHeading, turnSignalRadians: turnSignalRadians)
         applySurveyedCellPrior()
         normalize()
         if effectiveParticleCount < Double(particles.count) * ParticleFilter2DParams.resampleNeffFraction { resample() }
@@ -274,8 +275,8 @@ final class ParticleFilter2D {
         )
     }
 
-    private func injectTurnRecoveryParticles(from previousEstimate: MapPoint2D, previousHeading: Double, gyroDeltaRadians: Double) {
-        let turnAmount = abs(gyroDeltaRadians)
+    private func injectTurnRecoveryParticles(from previousEstimate: MapPoint2D, previousHeading: Double, turnSignalRadians: Double) {
+        let turnAmount = abs(turnSignalRadians)
         guard turnAmount >= ParticleFilter2DParams.turnRecoveryThresholdRadians, !particles.isEmpty else { return }
         let fraction = min(
             ParticleFilter2DParams.turnRecoveryMaxParticleFraction,
@@ -286,7 +287,7 @@ final class ParticleFilter2D {
         var injected = 0
         for index in replacementIndices {
             let turnProgress = 0.35 + 0.9 * rng.nextUnit()
-            let heading = previousHeading + gyroDeltaRadians * turnProgress + rng.normal(mean: 0, sigma: ParticleFilter2DParams.turnRecoveryHeadingSigmaRadians)
+            let heading = previousHeading + turnSignalRadians * turnProgress + rng.normal(mean: 0, sigma: ParticleFilter2DParams.turnRecoveryHeadingSigmaRadians)
             let step = max(0.2, rng.normal(mean: ParticleFilter2DParams.stepLengthMeters, sigma: ParticleFilter2DParams.stepLengthSigmaMeters))
             let lateral = rng.normal(mean: 0, sigma: ParticleFilter2DParams.turnRecoveryPositionJitterMeters)
             let point = MapPoint2D(

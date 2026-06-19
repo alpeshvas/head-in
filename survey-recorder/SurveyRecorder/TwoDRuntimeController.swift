@@ -39,6 +39,7 @@ final class TwoDRuntimeController {
     @ObservationIgnored private var latestStepFeature: MagneticFeature2D?
     @ObservationIgnored private var latestStepFeatureIsUsable = false
     @ObservationIgnored private var lastStepFeature: MagneticFeature2D?
+    @ObservationIgnored private var recentStepYawDeltas: [Double] = []
     @ObservationIgnored private let debugWriter: TwoDRuntimeDebugWriter?
 
     init(
@@ -88,6 +89,7 @@ final class TwoDRuntimeController {
         latestStepFeature = nil
         latestStepFeatureIsUsable = false
         lastStepFeature = nil
+        recentStepYawDeltas = []
         stepDetector.reset()
         if let filter { updateRuntimeDiagnostics(filter: filter) }
         if let filter, let estimate {
@@ -181,7 +183,11 @@ final class TwoDRuntimeController {
             appleSteps: applePedometerSteps,
             rejectedPeaks: rejectedStepCandidateCount
         )
-        filter.predictStep(gyroDeltaRadians: stepYawDelta)
+        recentStepYawDeltas.append(stepYawDelta)
+        if recentStepYawDeltas.count > 2 { recentStepYawDeltas.removeFirst(recentStepYawDeltas.count - 2) }
+        let twoStepYawDelta = recentStepYawDeltas.reduce(0, +)
+        let turnSignalYawDelta = abs(twoStepYawDelta) >= ParticleFilter2DParams.turnRecoveryThresholdRadians ? twoStepYawDelta : stepYawDelta
+        filter.predictStep(gyroDeltaRadians: stepYawDelta, turnSignalRadians: turnSignalYawDelta)
         lastStepYawDeltaDegrees = stepYawDelta * 180 / .pi
         turnRecoveryParticleCount = filter.lastTurnRecoveryParticleCount
         pendingYawDelta = 0
