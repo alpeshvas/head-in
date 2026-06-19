@@ -12,8 +12,10 @@ can walk a surveyed path to the end, **U-turn, and walk back along the same path
 ## Headline finding
 
 **CONDITIONAL-GO.** To-and-fro on a *single* surveyed path is a fundamentally
-easier problem than the documented free-roam NO-GO, and the central hypothesis is
-**supported by the literature and by this codebase's own measured properties**:
+easier problem than full free-roam (open free-roam still needs more work — see the
+`free-roam` branch, currently at 37% held-out without anchors), and the central
+hypothesis is **supported by the literature and by this codebase's own measured
+properties**:
 
 1. The magnetic and PDR machinery already in the filter tracks a retraced path in
    reverse *for free in principle* — the field is the same field walked backward,
@@ -29,7 +31,8 @@ easier problem than the documented free-roam NO-GO, and the central hypothesis i
    ([direction-and-entrance-anchoring.md](direction-and-entrance-anchoring.md) §2,
    STATUS L98). So a **binary forward/backward "direction latch"** toggled by
    detected unmatched ~180° turns is a *plausible* substitute for the
-   continuous-gait-heading signal that was a NO-GO at this effort level.
+   continuous-gait-heading signal (which was harder than expected at the effort
+   tried — a discrete latch sidesteps it).
 3. **FollowMe (MobiCom 2015), our closest cited system, already does exactly this
    bidirectionally** — its deviation-recovery replays the trace "in the reverse
    direction" to guide the user back, and it states plainly that "the reverse
@@ -51,9 +54,10 @@ But it is **CONDITIONAL**, not GO, because:
    before any Swift/live work. The offline validation plan (§7) is the real
    deliverable; the design sketch is provisional until that trace exists.
 
-**Boundary (explicit):** this is NARROWER than free-roam (arbitrary rooms, any
-order, shortcuts), which is a documented NO-GO on the `free-roam` branch (37%
-held-out without anchors). To-and-fro fixes the **return leg and repeated
+**Boundary (explicit):** this is NARROWER than full free-roam (arbitrary rooms, any
+order, shortcuts), which is a harder open problem on the `free-roam` branch (37%
+held-out so far without anchors — see that branch for the path forward). To-and-fro
+fixes the **return leg and repeated
 back-and-forth on ONE path walked end-to-end**. It does **not** solve "user starts
 by walking the route backward from the far end" (cold start still assumes the
 Start press = entrance anchor, §5).
@@ -323,7 +327,8 @@ start**; it does **NOT** solve:
   reverse-walk bug (STATUS L96), unsolved without entrance anchoring (magnetic-only
   entrance arming was ATTEMPTED and REVERTED, STATUS L97; GPS/NFC entrance cue is the
   research-aligned fix, blocked on hardware/venue).
-- Arbitrary room order / shortcuts — free-roam NO-GO (`free-roam` branch, 37%).
+- Arbitrary room order / shortcuts — full free-roam, a separate open problem
+  (`free-roam` branch, 37% held-out so far without anchors).
 
 This boundary is **clean and defensible**: a guided tour enters at the start by
 construction. To-and-fro is "you reached the end of the tour and now walk back out the
@@ -384,7 +389,7 @@ which is a continuous-heading correction, not a path-direction state. **So the
 "heading-parity state" framing remains an extrapolation** (STATUS L53 flagged it as
 not-from-the-literature) — but it is a *reasonable discretization* of mechanisms the
 literature does use, and it is strictly cheaper than the gait-heading continuous signal
-that was the documented NO-GO. The literature supports the *ingredients* (gyro U-turn
+(which was harder than expected at the effort tried). The literature supports the *ingredients* (gyro U-turn
 detection is travel-coupled and reliable for ~180° pivots; reversed-sequence magnetic
 match works); it does not pre-package the exact latch.
 
@@ -410,10 +415,11 @@ GO conditions, in order of how load-bearing they are:
 3. The latch toggle must **not mis-fire on the route's own turns** (reuse the
    matched/unmatched + proximity/support gates).
 
-NO-GO conditions that would downgrade it: reverse emission does NOT ridge (would mean the
-differenced reverse-read doesn't actually discriminate on real data — refutes §2);
-end U-turn reliably missed even in hand; or the latch regresses forward walks the way
-the rejected backward-prediction did (STATUS L92).
+Conditions that would force a rethink of the approach: reverse emission does NOT ridge
+(would mean the differenced reverse-read doesn't actually discriminate on real data —
+refutes §2); end U-turn reliably missed even in hand; or the latch regresses forward
+walks the way the rejected backward-prediction did (STATUS L92). Each has a known next
+lever if hit (e.g. magnetic-shape reversal confirm, recapture anchors).
 
 ### Minimal design sketch (provisional, gated on §7 validation)
 
@@ -490,9 +496,11 @@ offline matrix.
 | Hardest failure mode? | Missed/slow end U-turn (latch never flips, return leg untracked) + false-toggle from a route's own U-turn (§3.2–3.5) — both mitigated by a magnetic-shape reverse cross-check |
 | Blocking prerequisite? | **Capture ONE hand-carry out-and-back recording with ARKit GT; show a reverse likelihood ridge and a clean latch flip in a JS-only prototype BEFORE any Swift work** (§7) |
 
-**Out of scope (unchanged):** free-roam / any-order / shortcuts (free-roam NO-GO);
-backward-from-far-end cold start (needs entrance anchoring, STATUS L96–L100);
-pocket-carry latch (turn evidence disabled in pocket — §3.1).
+**Out of scope here (separate open problems, each with a known next lever):**
+full free-roam / any-order / shortcuts (`free-roam` branch, 37% so far — needs
+anchors or a room-graph HMM); backward-from-far-end cold start (entrance
+anchoring, STATUS L96–L100); pocket-carry latch (turn evidence currently
+hand-only — §3.1, a pocket turn model would extend it).
 
 ---
 

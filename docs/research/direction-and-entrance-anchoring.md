@@ -108,7 +108,7 @@ PCA-GA with gait-cycle sign resolution (lit. P50 heading error 5.6°) → clean
 ~180° gate → reject reverse/wrong-way before firing. This validates option (a) in
 the decision list above as the right direction.
 
-### Go/no-go follow-up (2026-06-19): per-segment repeatability — NO-GO for a guard with crude sign resolution
+### Follow-up (2026-06-19): per-segment repeatability — the crude-sign-resolution guard isn't ready; here's what would make it work
 
 To build a wrong-way GATE you need a stable per-segment "expected heading" the
 live value can be compared against. Computed per anchor-segment
@@ -125,11 +125,17 @@ agree. They don't:
 
 Segments disagree by ~100–170° **between two forward passes of the same route** —
 the crude integrated-velocity sign resolution flips inconsistently (±180°). With
-no stable forward reference, a guard cannot separate "wrong-way" from normal
-pass-to-pass noise. **NO-GO** for a gait-heading wrong-way guard at this effort
-level. A usable guard requires proper per-step **gait-cycle sign resolution**
-(PCA-GA stance-phase, lit. 5.6° P50) — substantial signal processing, and
-cross-pass/pose repeatability still unproven. Decision: do **not** ship a reverse
-guard on the guided-tour branch; the reverse/out-of-order cases remain documented
-out-of-design limitations, and "any-order" support is the free-roam branch's job
-(per-zone matching), not a heading guard.
+no stable forward reference, *this cheap version* of the guard can't yet separate
+"wrong-way" from normal pass-to-pass noise — so it's **not ready to ship as-is**,
+not that the signal isn't there (the §"Experiment run" 136° forward/reverse split
+shows the direction information clearly exists). The known path to a usable guard:
+proper per-step **gait-cycle sign resolution** (PCA-GA stance-phase, lit. 5.6° P50)
+in place of the crude integrated-velocity sign — real signal processing, with
+cross-pass/pose repeatability to verify next. Interim decision: don't ship a
+reverse guard on the guided-tour branch *yet*; reverse/out-of-order remain
+documented limitations for now. Note the later, lighter win that DID land:
+**discrete gyro-U-turn direction latch + reversed-turn recapture** for to-and-fro
+on one path ([bidirectional-route-tracking.md](bidirectional-route-tracking.md)) —
+a cheaper route to direction-awareness that sidesteps continuous gait heading.
+Broader "any-order" support is the `free-roam` branch's track (per-zone matching /
+room-graph), a separate open problem.
