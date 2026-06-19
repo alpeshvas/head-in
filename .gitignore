@@ -15,3 +15,5 @@ analysis/*.html
 
 # Local build output
 build/
+
+survey-recorder/build-sim/

@@ -15,6 +15,13 @@ final class SessionWriter {
         return docs.appendingPathComponent("sessions", isDirectory: true)
     }
 
+    /// Filename-safe form of a venue/route id. Keeps the same character class as
+    /// the recorded filenames so the route library can match files back to a
+    /// route by `safeName(venue)_safeName(route)_` prefix.
+    static func safeName(_ s: String) -> String {
+        s.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "-", options: .regularExpression)
+    }
+
     init(setup: RouteSetup) throws {
         let dir = Self.sessionsDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -24,9 +31,7 @@ final class SessionWriter {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         let stamp = formatter.string(from: Date())
 
-        let safe = { (s: String) -> String in
-            s.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "-", options: .regularExpression)
-        }
+        let safe = Self.safeName
         let name = "\(safe(setup.venueId))_\(safe(setup.routeId))_\(setup.direction.rawValue)_\(setup.devicePose.rawValue)_\(setup.passType.rawValue)_\(stamp).jsonl"
         fileURL = dir.appendingPathComponent(name)
 

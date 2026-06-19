@@ -157,7 +157,7 @@ struct RouteMapLegend: View {
                         .frame(width: 16, height: 16)
                         .background(Circle().fill(reached ? Instrument.phosphor : Instrument.panel))
                         .overlay(Circle().stroke(reached ? Instrument.phosphor : Instrument.hairline, lineWidth: 1))
-                    Text(cp.name)
+                    Text(controller.anchorDisplayName(idx, fallback: cp.name))
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundStyle(reached ? Instrument.textPrimary : Instrument.textSecondary)
                         .lineLimit(1).truncationMode(.tail)
@@ -167,11 +167,58 @@ struct RouteMapLegend: View {
     }
 }
 
+/// Flat top-down vs isometric "diorama" rendering of the same surveyed path.
+enum MapDisplayMode: String { case flat, iso }
+
+/// Compact 2D/3D segmented toggle that matches the instrument chrome.
+struct MapModeToggle: View {
+    @Binding var mode: MapDisplayMode
+    var body: some View {
+        HStack(spacing: 2) {
+            segment("2D", .flat)
+            segment("3D", .iso)
+        }
+        .padding(2)
+        .background(Instrument.panel, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Instrument.hairline, lineWidth: 1))
+    }
+    private func segment(_ label: String, _ value: MapDisplayMode) -> some View {
+        let on = mode == value
+        return Button { mode = value } label: {
+            Text(label)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(on ? Instrument.ink : Instrument.textSecondary)
+                .frame(width: 30, height: 24)
+                .background(on ? Instrument.phosphor : .clear, in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(value == .flat ? "Flat map" : "Isometric map")
+    }
+}
+
+/// Switches between the flat and isometric canvases for a given mode.
+struct RouteMapDisplay: View {
+    let controller: LivePositioningController
+    let pathData: RoutePathData
+    let mode: MapDisplayMode
+    var showBadges = true
+    /// Enables orbit/tilt/zoom on the 3-D scene (full-screen only).
+    var interactive = false
+    var body: some View {
+        switch mode {
+        case .flat: RouteMapCanvas(controller: controller, pathData: pathData, showBadges: showBadges)
+        case .iso:  RouteScene3DView(controller: controller, pathData: pathData,
+                                     showBadges: showBadges, interactive: interactive)
+        }
+    }
+}
+
 /// DEV map card. Tap (or the expand button) opens a full-screen view.
 struct RouteMapView: View {
     let controller: LivePositioningController
     let pathData: RoutePathData
     @State private var fullScreen = false
+    @State private var mode: MapDisplayMode = .iso
 
     var body: some View {
         let st = routeMapState(controller)
@@ -180,6 +227,7 @@ struct RouteMapView: View {
                 Text("FLOOR MAP").monoTag(Instrument.textSecondary)
                 Rectangle().fill(Instrument.hairline).frame(height: 1)
                 InstrumentChip(text: st.label, color: st.color)
+                MapModeToggle(mode: $mode)
                 Button { fullScreen = true } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.system(size: 12, weight: .bold))
@@ -193,7 +241,7 @@ struct RouteMapView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Expand map")
             }
-            RouteMapCanvas(controller: controller, pathData: pathData)
+            RouteMapDisplay(controller: controller, pathData: pathData, mode: mode)
                 .frame(height: 188)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Instrument.hairline, lineWidth: 1))
@@ -205,7 +253,7 @@ struct RouteMapView: View {
                 .foregroundStyle(Instrument.textSecondary)
         }
         .fullScreenCover(isPresented: $fullScreen) {
-            RouteMapFullScreen(controller: controller, pathData: pathData)
+            RouteMapFullScreen(controller: controller, pathData: pathData, mode: $mode)
         }
     }
 }
@@ -213,6 +261,7 @@ struct RouteMapView: View {
 private struct RouteMapFullScreen: View {
     let controller: LivePositioningController
     let pathData: RoutePathData
+    @Binding var mode: MapDisplayMode
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -227,6 +276,7 @@ private struct RouteMapFullScreen: View {
                             .foregroundStyle(Instrument.textPrimary)
                     }
                     Spacer()
+                    MapModeToggle(mode: $mode)
                     InstrumentChip(text: routeMapState(controller).label, color: routeMapState(controller).color)
                     Button { dismiss() } label: {
                         Image(systemName: "xmark")
@@ -241,13 +291,40 @@ private struct RouteMapFullScreen: View {
                     .buttonStyle(.plain).padding(.leading, 4)
                     .accessibilityLabel("Close map")
                 }
-                RouteMapCanvas(controller: controller, pathData: pathData)
+                RouteMapDisplay(controller: controller, pathData: pathData, mode: mode, interactive: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Instrument.hairline, lineWidth: 1))
                 RouteMapLegend(controller: controller, pathData: pathData)
+                controlBar
             }
             .padding()
         }
+    }
+
+    /// Start/Reset + Stop without leaving the enlarged map — same actions as the
+    /// Live screen's controls card.
+    private var controlBar: some View {
+        HStack(spacing: 10) {
+            Button { controller.startOrReset() } label: {
+                Label(startButtonTitle, systemImage: "location.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(InstrumentButtonStyle(tint: Instrument.phosphor, prominent: true))
+            .disabled(!controller.deviceMotionAvailable)
+
+            Button { controller.stop() } label: {
+                Label("Stop", systemImage: "stop.fill")
+            }
+            .buttonStyle(InstrumentButtonStyle(tint: Instrument.coral, prominent: false))
+            .disabled(!controller.isRunning)
+            .opacity(controller.isRunning ? 1 : 0.4)
+            .frame(maxWidth: 130)
+        }
+    }
+
+    private var startButtonTitle: String {
+        controller.isRunning || controller.totalSampleCount > 0 || controller.isComplete
+            ? "Restart" : "Start Tracking"
     }
 }

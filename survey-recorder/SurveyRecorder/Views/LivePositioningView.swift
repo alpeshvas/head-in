@@ -3,6 +3,7 @@ import SwiftUI
 
 struct LivePositioningView: View {
     @AppStorage("liveProfileResource") private var profileResource = RouteProfile.bundledProfiles[0].resource
+    @Environment(RouteRegistry.self) private var registry
 
     @State private var controller: LivePositioningController?
     @State private var loadError: String?
@@ -44,6 +45,7 @@ struct LivePositioningView: View {
             }
         }
         .task(loadProfile)
+        .onAppear(perform: applyDisplayNames)
         .onDisappear {
             controller?.stop()
         }
@@ -53,8 +55,23 @@ struct LivePositioningView: View {
         guard controller == nil, loadError == nil else { return }
         do {
             controller = try LivePositioningController(profile: RouteProfile.loadBundled(resource: profileResource))
+            applyDisplayNames()
         } catch {
             loadError = "Could not load the bundled route profile: \(error.localizedDescription)"
+        }
+    }
+
+    /// Bridge survey-registry checkpoint names onto the Live display when a route
+    /// with the same venue/route and the same number of anchors exists. Re-runs
+    /// on appear so renames made in the Survey tab show up here.
+    private func applyDisplayNames() {
+        guard let controller else { return }
+        let r = controller.profile.route
+        if let record = registry.record(venueId: r.venueId, routeId: r.routeId),
+           record.checkpoints.count == controller.profile.anchors.count {
+            controller.checkpointDisplayNames = record.checkpoints
+        } else {
+            controller.checkpointDisplayNames = nil
         }
     }
 
@@ -264,7 +281,7 @@ private struct LivePositioningContent: View {
     }
 
     private var startButtonTitle: String {
-        controller.isRunning || controller.totalSampleCount > 0 || controller.isComplete ? "Reset to Start" : "Start at Start"
+        controller.isRunning || controller.totalSampleCount > 0 || controller.isComplete ? "Restart" : "Start Tracking"
     }
 
     private var statusDisplayText: String {
