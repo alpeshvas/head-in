@@ -39,11 +39,18 @@ final class TwoDRuntimeController {
     @ObservationIgnored private var latestStepFeature: MagneticFeature2D?
     @ObservationIgnored private var latestStepFeatureIsUsable = false
     @ObservationIgnored private var lastStepFeature: MagneticFeature2D?
+    @ObservationIgnored private let debugWriter: TwoDRuntimeDebugWriter?
 
-    init(map: VenueMap2D, heatmapCells: [MagneticHeatmapCell], observationMode: ParticleObservationMode2D = .absolute) {
+    init(
+        map: VenueMap2D,
+        heatmapCells: [MagneticHeatmapCell],
+        observationMode: ParticleObservationMode2D = .absolute,
+        debugWriter: TwoDRuntimeDebugWriter? = nil
+    ) {
         self.map = map
         self.heatmapCells = heatmapCells
         self.observationMode = observationMode
+        self.debugWriter = debugWriter
     }
 
     func start(at entrance: Entrance2D) {
@@ -83,6 +90,19 @@ final class TwoDRuntimeController {
         lastStepFeature = nil
         stepDetector.reset()
         if let filter { updateRuntimeDiagnostics(filter: filter) }
+        if let filter, let estimate {
+            debugWriter?.writeFilter(
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                phase: "initial",
+                estimate: estimate,
+                nearestCellDistance: nearestHeatmapCellDistanceMeters,
+                meanParticleCellDistance: meanParticleCellDistanceMeters,
+                farParticlePercent: farParticlePercent,
+                magneticResidualUT: magneticResidualUT,
+                turnRecoveryParticleCount: turnRecoveryParticleCount,
+                particles: filter.particles
+            )
+        }
         isRunning = true
         statusText = "Tracking from \(entrance.name)"
 
@@ -130,12 +150,14 @@ final class TwoDRuntimeController {
         )
         latestStepFeature = feature
         latestStepFeatureIsUsable = feature != nil && motion.magneticField.accuracy != .uncalibrated
+        debugWriter?.writeMotion(motion, feature: feature)
 
         switch stepDetector.addSample(t: timestamp, magnitude: uaMagnitude) {
         case .accepted:
             acceptStep(filter: filter)
         case .rejected:
             rejectedStepCandidateCount += 1
+            debugWriter?.writeRejectedPeak(timestamp: timestamp, rejectedPeaks: rejectedStepCandidateCount)
         case .none:
             break
         }
@@ -145,16 +167,39 @@ final class TwoDRuntimeController {
         guard isRunning else { return }
         applePedometerSteps = max(0, data.numberOfSteps.intValue)
         updateStepDifference()
+        debugWriter?.writePedometer(data, detectedSteps: detectedSteps)
     }
 
     private func acceptStep(filter: ParticleFilter2D) {
         detectedSteps += 1
         updateStepDifference()
         let stepYawDelta = pendingYawDelta
+        debugWriter?.writeStep(
+            index: detectedSteps,
+            timestamp: previousMotionTimestamp ?? ProcessInfo.processInfo.systemUptime,
+            yawDeltaRadians: stepYawDelta,
+            appleSteps: applePedometerSteps,
+            rejectedPeaks: rejectedStepCandidateCount
+        )
         filter.predictStep(gyroDeltaRadians: stepYawDelta)
         lastStepYawDeltaDegrees = stepYawDelta * 180 / .pi
         turnRecoveryParticleCount = filter.lastTurnRecoveryParticleCount
         pendingYawDelta = 0
+        estimate = filter.estimate
+        updateRuntimeDiagnostics(filter: filter)
+        if let estimate {
+            debugWriter?.writeFilter(
+                timestamp: previousMotionTimestamp ?? ProcessInfo.processInfo.systemUptime,
+                phase: "afterPredict",
+                estimate: estimate,
+                nearestCellDistance: nearestHeatmapCellDistanceMeters,
+                meanParticleCellDistance: meanParticleCellDistanceMeters,
+                farParticlePercent: farParticlePercent,
+                magneticResidualUT: magneticResidualUT,
+                turnRecoveryParticleCount: turnRecoveryParticleCount,
+                particles: filter.particles
+            )
+        }
 
         if let feature = latestStepFeature, latestStepFeatureIsUsable {
             filter.observe(magnetic: feature, previous: lastStepFeature, mode: observationMode)
@@ -166,6 +211,19 @@ final class TwoDRuntimeController {
         }
         estimate = filter.estimate
         updateRuntimeDiagnostics(filter: filter)
+        if let estimate {
+            debugWriter?.writeFilter(
+                timestamp: previousMotionTimestamp ?? ProcessInfo.processInfo.systemUptime,
+                phase: "afterObserve",
+                estimate: estimate,
+                nearestCellDistance: nearestHeatmapCellDistanceMeters,
+                meanParticleCellDistance: meanParticleCellDistanceMeters,
+                farParticlePercent: farParticlePercent,
+                magneticResidualUT: magneticResidualUT,
+                turnRecoveryParticleCount: turnRecoveryParticleCount,
+                particles: filter.particles
+            )
+        }
         updateStatus()
     }
 
