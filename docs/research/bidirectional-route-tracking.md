@@ -760,12 +760,11 @@ leg from **P50 3.26 m → 18.89 m / P75 32.45 m** (belief stays pinned near the 
 barrier, never reverses). So the difference between a tracked and an untracked
 return leg is literally whether the terminus U-turn reaches `observeTurn`.
 
-**Reframed verdict:** the return-leg FILTER MATH is already good enough on a
-strong-profile route (≈ forward, ~3 m P50, within the 1–3 m band's upper edge and
-inside the ±5 m checkpoint gate except for one weak-segment excursion). **The thing
-standing between this and Live is not the math — it is that the decision path
-terminates filtering at forward completion.** The fix is a lifecycle change, not a
-filter change:
+**Reframed verdict (POSITION):** the return-leg position track is already good on a
+strong-profile route (≈ forward, ~3 m P50). See §14 for the sharper, decision-level
+picture — position-good is NOT the same as trigger-ready. **One blocker is that the
+decision path terminates filtering at forward completion.** The fix is a lifecycle
+change, not a filter change:
 1. After forward completion, do NOT tear down — enter a bounded "return watch":
    keep the filter alive, keep feeding steps + turns.
 2. Deliver a terminus U-turn (≥140°, posterior at end) to `observeTurn` even
@@ -806,3 +805,94 @@ post-completion return-watch tracks the same ~3 m.
   `LivePositioningController.completeRoute()` teardown** (`:508`) — the Swift
   controller still tears down at completion; the parallel return-watch change
   there is offline-untestable and deferred to a device session.
+
+## 14. The decision metric is harsher than the position metric: return TRIGGERS are 4/7 within ±5 m (2026-06-20)
+
+§13's headline (return P50 3.26 m) measures *position*. The commercial gate
+(STATUS L104 / SYNTHESIS) is **≥90 % checkpoint triggers within ±5 m** — a
+*decision* metric. Measured the return-leg trigger accuracy directly: drive the
+shipped `replay()`, and for each checkpoint fire the §4-A "returning past X"
+policy (`P(s ≤ decisionBin) > τ` twice consecutively while `returning`,
+pOff < 0.5), then compare where the user TRULY was (ARKit) at the fire instant.
+
+**Result on the crisp-pivot round-trip: only 4/7 within ±5 m** — fails the gate.
+
+| Checkpoint (return order) | true cross-back | est fire | trigger err |
+|---|---|---|---|
+| Arcade/ATH | t+48.5 | t+50.8 | 2.38 m ✅ |
+| Ops table | t+55.1 | t+57.6 | 2.84 m ✅ |
+| Kitchen | t+62.1 | t+72.6 | **9.78 m** ❌ |
+| Finance | t+70.2 | t+85.9 | **16.20 m** ❌ |
+| Diwal | t+77.5 | t+85.9 | **9.45 m** ❌ |
+| Paundha | t+83.5 | t+85.9 | 2.70 m ✅ |
+| Sleeping bench | t+89.9 | t+91.4 | 1.79 m ✅ |
+
+**The 4 passing checkpoints are the ones at/near corners** (recapture re-pins the
+belief there, error ~2 m). **The 3 failing ones are mid-route, around weak
+segment 5** (Kitchen→Ops, r 0.34) — and they fail *together*: during the
+weak-segment OFF blackout (t+76–84, pOff→1.0, §13) the mid-route checkpoints
+cannot fire (pOff > 0.5 gate), then the −71° corner recapture jumps the belief
+PAST several decision bins at once → **a batch of late fires** (Finance + Diwal +
+Paundha all declared at t+85.9, long after the user physically crossed them).
+Kitchen fails by a different mechanism — 10 s of pre-blackout drift delays its
+`P(s ≤ X)` crossing.
+
+**So the position number flattered the result.** The recapture sawtooth keeps P50
+low because it nails the corners, but the *between-corner* return positions — which
+is where the mid-route checkpoints live — drift then black-out then batch-recover.
+For a guided tour whose checkpoints sit between corners (rooms along a corridor,
+exactly LIS), the return leg is **NOT trigger-ready** despite a 3 m P50.
+
+**Root cause, chased to the bottom — it is a STRIDE-CALIBRATION mismatch on the
+open segment, NOT an emission/OFF problem.** Two experiments, both run through the
+shipped `replay()`:
+
+1. **Dead-reckoning OFF re-entry (TRIED, reverted).** Made the OFF re-entry center
+   coast −stride/step through the blackout (the OFF analog of the §10 −stride
+   `predictStep`), gated to `returning` so it is forward-inert (forward matrix
+   byte-identical, confirmed). It *did* fix the symptom it targeted — the belief
+   no longer teleports to bin ~1581 during the blackout, it coasts 992→865 — but
+   **return triggers stayed 4/7 and P50/P75 were byte-identical.** Reverted (no
+   gate movement; the teleport it removed was already masked by the OFF flag).
+   Why it failed: the belief enters the blackout *already ~8 m behind*, and it
+   coasts at the same (wrong) stride, so it never catches up.
+
+2. **Where the ~8 m pre-blackout lag comes from (the real cause).** On seg5 the
+   belief advances ~30 % too slowly *before* the blackout (pOff still ~0). Measured
+   stride on seg5: profile `binsPerStep` = **11.7**, but the live walk strides
+   **20.7 bins/step forward and 17.5 backward** (ratio 1.5–1.8×). The surveyor
+   took ~20 short steps over seg5 where the walker takes ~12 — seg5 is "a long open
+   stretch" and the survey pace there is anomalous (every other segment:
+   binsPerStep 14–30, matching its live stride). So the ±stride model
+   *structurally* undershoots seg5 for any normal walker. Forward survives because
+   the strong bracketing segments (seg4/seg6) re-localize before its checkpoints
+   fire; the return leg's mid-segment checkpoints (Diwal, Finance) are crossed
+   during the uncorrected undershoot, before the next corner recapture.
+
+3. **Naive stride fix makes it WORSE (TRIED).** Bumping seg5 `binsPerStep`
+   11.7→18.5 (to match the live stride) drops return triggers to 3/7 and raises
+   P50 3.26→5.71. Reason: `binsPerStep` is not just the PDR stride — it is also the
+   **differenced-emission lag** (`lag = round(binsPerStep)`, `grid-filter.js:294`)
+   and the kernel width, all fitted together. Changing it desyncs the emission on
+   seg5. So the PDR stride and the emission lag are **coupled**, and correcting the
+   stride alone breaks the match.
+
+**Updated verdict:** to-and-fro return tracking is *position-good* (~3 m P50) but
+*trigger-marginal* (4/7 within ±5 m, below the ≥90 % gate) on LIS, whose seg5 is a
+weak (r 0.34) AND survey-stride-anomalous open stretch with checkpoints sitting
+between corners. Two blockers remain, in order:
+- **(1) Live lifecycle teardown** (§13) — fix specified, offline-validated,
+  device-deploy deferred. This is the clean, ready blocker.
+- **(2) seg5 stride/emission coupling** — the harder one. NOT fixable by the OFF
+  re-entry or a naive `binsPerStep` bump (both tried). Proper fixes are Phase-4 /
+  data: (a) decouple the PDR stride (prediction) from the emission lag (matching)
+  and re-fit — architectural; (b) adaptive per-step stride from live cadence
+  (RoNIN-class); or (c) re-survey seg5 at a consistent walking stride so the
+  profile stride matches reality — a survey-process fix, cheapest to try.
+
+**The single most useful next datum is a STRONG-ROUTE round-trip** (Plumeria Test
+~12 m or L478 43 m — both track sub-meter forward with consistent strides). It
+would settle whether to-and-fro triggering is fundamentally fine and only needs the
+§13 lifecycle change (likely — corner recaptures + good emission, no anomalous
+segment), or whether the mid-segment trigger problem generalizes beyond LIS's seg5.
+On the available LIS data the two are confounded.
