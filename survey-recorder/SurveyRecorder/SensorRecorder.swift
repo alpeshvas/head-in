@@ -23,8 +23,13 @@ final class SensorRecorder {
 
     var isDeviceMotionAvailable: Bool { motion.isDeviceMotionAvailable }
 
-    func start() {
-        let interval = 1.0 / Self.sampleRateHz
+    func start(
+        sampleRateHz: Double = SensorRecorder.sampleRateHz,
+        includeMagnetometer: Bool = true,
+        includePedometer: Bool = true,
+        includeAltimeter: Bool = true
+    ) {
+        let interval = 1.0 / max(1.0, sampleRateHz)
 
         if motion.isDeviceMotionAvailable {
             motion.deviceMotionUpdateInterval = interval
@@ -35,7 +40,7 @@ final class SensorRecorder {
             }
         }
 
-        if motion.isMagnetometerAvailable {
+        if includeMagnetometer, motion.isMagnetometerAvailable {
             motion.magnetometerUpdateInterval = interval
             motion.startMagnetometerUpdates(to: sensorQueue) { [weak self] data, _ in
                 guard let data else { return }
@@ -43,7 +48,7 @@ final class SensorRecorder {
             }
         }
 
-        if CMPedometer.isStepCountingAvailable() {
+        if includePedometer, CMPedometer.isStepCountingAvailable() {
             pedometer.startUpdates(from: Date()) { [weak self] data, _ in
                 guard let data else { return }
                 self?.onPedometer?(data)
@@ -51,7 +56,7 @@ final class SensorRecorder {
         }
 
         // Barometer is recorded for future use only; floor detection is out of scope (see docs).
-        if CMAltimeter.isRelativeAltitudeAvailable() {
+        if includeAltimeter, CMAltimeter.isRelativeAltitudeAvailable() {
             altimeter.startRelativeAltitudeUpdates(to: sensorQueue) { [weak self] data, _ in
                 guard let data else { return }
                 self?.onAltimeter?(data)

@@ -27,6 +27,16 @@ struct HeatmapAccumulator2D {
         buckets.removeAll(keepingCapacity: true)
     }
 
+    mutating func reset(seedCells cells: [MagneticHeatmapCell]) {
+        buckets.removeAll(keepingCapacity: true)
+        for cell in cells {
+            guard cell.sampleCount > 0,
+                  let state = CellState(seed: cell) else { continue }
+            let key = CellKey(point: cell.center, cellSizeMeters: cellSizeMeters)
+            buckets[key] = state
+        }
+    }
+
     mutating func add(_ sample: SurveySample2D, in map: VenueMap2D) {
         guard Geometry2D.isWalkable(sample.mapPoint, in: map) else { return }
         let key = CellKey(point: sample.mapPoint, cellSizeMeters: cellSizeMeters)
@@ -144,6 +154,29 @@ struct HeatmapAccumulator2D {
         var sumSqHorizontalUT: Double = 0
         var deltas: [Double] = []
 
+        init() {}
+
+        init?(seed cell: MagneticHeatmapCell) {
+            guard cell.sampleCount > 0,
+                  let meanMagnitude = cell.meanMagnitudeUT,
+                  let meanVertical = cell.meanVerticalUT,
+                  let meanHorizontal = cell.meanHorizontalUT else { return nil }
+            sampleCount = cell.sampleCount
+            passCount = cell.passCount
+            sumMagnitudeUT = meanMagnitude * Double(sampleCount)
+            sumVerticalUT = meanVertical * Double(sampleCount)
+            sumHorizontalUT = meanHorizontal * Double(sampleCount)
+            sumSqMagnitudeUT = Self.seededSumSq(mean: meanMagnitude, stddev: cell.stddevMagnitudeUT ?? 0, count: sampleCount)
+            sumSqVerticalUT = Self.seededSumSq(mean: meanVertical, stddev: cell.stddevVerticalUT ?? 0, count: sampleCount)
+            sumSqHorizontalUT = Self.seededSumSq(mean: meanHorizontal, stddev: cell.stddevHorizontalUT ?? 0, count: sampleCount)
+            if cell.magneticChangeUT > 0 { deltas = [cell.magneticChangeUT] }
+        }
+
+        private static func seededSumSq(mean: Double, stddev: Double, count: Int) -> Double {
+            guard count > 1 else { return mean * mean * Double(max(count, 1)) }
+            return stddev * stddev * Double(count - 1) + mean * mean * Double(count)
+        }
+
         mutating func add(_ sample: SurveySample2D, passSeparationSeconds: TimeInterval) {
             let mag = sample.magnetic.magnitudeUT
             let vert = sample.magnetic.verticalUT
@@ -155,8 +188,10 @@ struct HeatmapAccumulator2D {
                 let dv = vert - lastVerticalUT
                 let dh = horiz - lastHorizontalUT
                 deltas.append(sqrt(dm * dm + dv * dv + dh * dh))
-            } else {
+            } else if sampleCount == 0 {
                 passCount = 1
+            } else {
+                passCount += 1
             }
             sampleCount += 1
             lastTimestamp = sample.timestamp

@@ -189,7 +189,7 @@ struct MapHeatmapView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("2D survey")
                             .font(.headline)
-                        Text(surveyController?.statusText ?? "Start AR survey, capture alignment points, then walk coverage.")
+                        Text(surveyController?.statusText ?? "Start AR survey to add another pass, capture alignment points, then walk coverage.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                         if let saveNote {
@@ -199,10 +199,18 @@ struct MapHeatmapView: View {
                         }
                     }
                     Spacer()
-                    Button(surveyController?.isRunning == true ? "Stop" : "Start") {
-                        toggleSurvey()
+                    VStack(alignment: .trailing, spacing: 8) {
+                        Button(surveyController?.isRunning == true ? "Stop" : "Start") {
+                            toggleSurvey()
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Clear") {
+                            clearSurveyedHeatmap()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(surveyController?.isRunning == true || cells.isEmpty)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
 
                 if let controller = surveyController {
@@ -334,6 +342,21 @@ struct MapHeatmapView: View {
         controller.start()
     }
 
+    private func clearSurveyedHeatmap() {
+        var updated = bundle
+        updated.heatmapCells = []
+        do {
+            try VenueMap2DStore.save(updated)
+            bundle = updated
+            surveyController = nil
+            runtimeController?.stop()
+            runtimeController = nil
+            saveNote = "Cleared saved heatmap. Next survey starts fresh."
+        } catch {
+            importError = "Could not clear heatmap: \(error.localizedDescription)"
+        }
+    }
+
     /// Bake the just-surveyed heatmap into the persisted venue-map bundle so it
     /// survives relaunch with no offline build-2d-heatmap.js + re-import round trip.
     /// Same cell logic as that script (HeatmapAccumulator2D); this only persists it.
@@ -344,7 +367,7 @@ struct MapHeatmapView: View {
         do {
             try VenueMap2DStore.save(updated)
             bundle = updated
-            saveNote = "Saved \(controller.heatmapCells.count) heatmap cells to this venue map."
+            saveNote = "Saved accumulated heatmap with \(controller.heatmapCells.count) cells."
         } catch {
             importError = "Could not save heatmap: \(error.localizedDescription)"
         }

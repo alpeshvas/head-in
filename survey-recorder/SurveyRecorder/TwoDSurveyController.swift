@@ -5,6 +5,8 @@ import Observation
 @MainActor
 @Observable
 final class TwoDSurveyController {
+    static let surveySampleRateHz = 25.0
+
     let map: VenueMap2D
 
     private(set) var isRunning = false
@@ -32,7 +34,7 @@ final class TwoDSurveyController {
     @ObservationIgnored private var pendingRejectedCount = 0
     @ObservationIgnored private var lastPublishT = -Double.infinity
 
-    private let publishIntervalSeconds = 0.3
+    private let publishIntervalSeconds = 0.75
 
     init(map: VenueMap2D, existingCells: [MagneticHeatmapCell] = []) {
         self.map = map
@@ -54,7 +56,7 @@ final class TwoDSurveyController {
         }
 
         isRunning = true
-        statusText = "Starting AR survey"
+        statusText = heatmapCells.isEmpty ? "Starting AR survey" : "Adding survey pass"
         trackingStatus = "starting"
         pendingTrackingStatus = "starting"
         latestMapPoint = nil
@@ -67,8 +69,7 @@ final class TwoDSurveyController {
         pendingMagneticFeature = nil
         pendingSampleCount = 0
         pendingRejectedCount = 0
-        accumulator.reset()
-        heatmapCells = []
+        accumulator.reset(seedCells: heatmapCells)
         alignmentPairs.removeAll(keepingCapacity: true)
         transform = nil
         latestARPoint = nil
@@ -96,7 +97,12 @@ final class TwoDSurveyController {
         }
 
         arRecorder.start()
-        sensorRecorder.start()
+        sensorRecorder.start(
+            sampleRateHz: Self.surveySampleRateHz,
+            includeMagnetometer: false,
+            includePedometer: false,
+            includeAltimeter: false
+        )
     }
 
     func stop() {

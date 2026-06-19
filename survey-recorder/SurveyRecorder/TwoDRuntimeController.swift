@@ -29,10 +29,12 @@ final class TwoDRuntimeController {
     private(set) var turnRecoveryParticleCount = 0
 
     @ObservationIgnored private let sensorRecorder = SensorRecorder()
-    @ObservationIgnored private var stepDetector = StepDetector2D()
     @ObservationIgnored private var filter: ParticleFilter2D?
     @ObservationIgnored private var previousMotionTimestamp: TimeInterval?
     @ObservationIgnored private var pendingYawDelta = 0.0
+    @ObservationIgnored private var lastPedometerStepCount: Int?
+    @ObservationIgnored private var latestStepFeature: MagneticFeature2D?
+    @ObservationIgnored private var latestStepFeatureIsUsable = false
     @ObservationIgnored private var lastStepFeature: MagneticFeature2D?
 
     init(map: VenueMap2D, heatmapCells: [MagneticHeatmapCell], observationMode: ParticleObservationMode2D = .absolute) {
@@ -70,8 +72,10 @@ final class TwoDRuntimeController {
         turnRecoveryParticleCount = 0
         pendingYawDelta = 0
         previousMotionTimestamp = nil
+        lastPedometerStepCount = nil
+        latestStepFeature = nil
+        latestStepFeatureIsUsable = false
         lastStepFeature = nil
-        stepDetector.reset()
         if let filter { updateRuntimeDiagnostics(filter: filter) }
         isRunning = true
         statusText = "Tracking from \(entrance.name)"
@@ -81,7 +85,12 @@ final class TwoDRuntimeController {
                 self?.handleMotion(motion)
             }
         }
-        sensorRecorder.start()
+        sensorRecorder.onPedometer = { [weak self] data in
+            Task { @MainActor [weak self] in
+                self?.handlePedometer(data)
+            }
+        }
+        sensorRecorder.start(includeMagnetometer: false, includePedometer: true, includeAltimeter: false)
     }
 
     func stop() {
@@ -92,10 +101,8 @@ final class TwoDRuntimeController {
     }
 
     private func handleMotion(_ motion: CMDeviceMotion) {
-        guard isRunning, let filter else { return }
+        guard isRunning else { return }
         let timestamp = motion.timestamp
-        let ua = motion.userAcceleration
-        let uaMagnitude = hypot3(ua.x, ua.y, ua.z)
 
         let rotation = motion.rotationRate
         let gravity = motion.gravity
@@ -113,16 +120,30 @@ final class TwoDRuntimeController {
             gravityVector: Vector3D(x: gravity.x, y: gravity.y, z: gravity.z),
             accuracyRawValue: Int(motion.magneticField.accuracy.rawValue)
         )
+        latestStepFeature = feature
+        latestStepFeatureIsUsable = feature != nil && motion.magneticField.accuracy != .uncalibrated
+    }
 
-        guard stepDetector.addSample(t: timestamp, magnitude: uaMagnitude) else { return }
-        detectedSteps += 1
-        let stepYawDelta = pendingYawDelta
-        filter.predictStep(gyroDeltaRadians: stepYawDelta)
-        lastStepYawDeltaDegrees = stepYawDelta * 180 / .pi
-        turnRecoveryParticleCount = filter.lastTurnRecoveryParticleCount
+    private func handlePedometer(_ data: CMPedometerData) {
+        guard isRunning, let filter else { return }
+        let stepCount = data.numberOfSteps.intValue
+        let previousCount = lastPedometerStepCount ?? 0
+        lastPedometerStepCount = stepCount
+        let stepDelta = stepCount - previousCount
+        guard stepDelta > 0 else { return }
+
+        detectedSteps += stepDelta
+        let yawPerStep = pendingYawDelta / Double(stepDelta)
+        var injectedCount = 0
+        for _ in 0..<stepDelta {
+            filter.predictStep(gyroDeltaRadians: yawPerStep)
+            injectedCount += filter.lastTurnRecoveryParticleCount
+        }
+        lastStepYawDeltaDegrees = yawPerStep * 180 / .pi
+        turnRecoveryParticleCount = injectedCount
         pendingYawDelta = 0
 
-        if let feature, motion.magneticField.accuracy != .uncalibrated {
+        if let feature = latestStepFeature, latestStepFeatureIsUsable {
             filter.observe(magnetic: feature, previous: lastStepFeature, mode: observationMode)
             if observationMode != .coverageOnly { magneticUpdates += 1 }
             observedMagnitudeUT = feature.magnitudeUT
@@ -181,57 +202,6 @@ final class TwoDRuntimeController {
     }
 }
 
-private struct StepDetector2D {
-    private struct TimedValue {
-        let t: TimeInterval
-        let value: Double
-    }
-
-    private var raw: [TimedValue] = []
-    private var smoothed: [TimedValue] = []
-    private var lastStepTime = -Double.infinity
-
-    mutating func reset() {
-        raw.removeAll(keepingCapacity: true)
-        smoothed.removeAll(keepingCapacity: true)
-        lastStepTime = -Double.infinity
-    }
-
-    mutating func addSample(t: TimeInterval, magnitude: Double) -> Bool {
-        guard magnitude.isFinite else { return false }
-        raw.append(TimedValue(t: t, value: magnitude))
-        if raw.count > 9 { raw.removeFirst(raw.count - 9) }
-        let smoothValue = raw.suffix(7).reduce(0) { $0 + $1.value } / Double(min(raw.count, 7))
-        smoothed.append(TimedValue(t: t, value: smoothValue))
-        if smoothed.count > 160 { smoothed.removeFirst(smoothed.count - 160) }
-        guard smoothed.count >= 5 else { return false }
-
-        let candidateIndex = smoothed.count - 2
-        let previous = smoothed[candidateIndex - 1]
-        let candidate = smoothed[candidateIndex]
-        let next = smoothed[candidateIndex + 1]
-        let recentValues = smoothed.suffix(min(120, smoothed.count)).map(\.value)
-        let med = median(recentValues)
-        let mad = median(recentValues.map { abs($0 - med) })
-        let threshold = med + max(0.045, 1.6 * (mad == 0 ? 0.03 : mad))
-        let isPeak = candidate.value > previous.value && candidate.value >= next.value && candidate.value > threshold
-        let farEnough = candidate.t - lastStepTime >= 0.34
-        if isPeak && farEnough {
-            lastStepTime = candidate.t
-            return true
-        }
-        return false
-    }
-}
-
 private func hypot3(_ x: Double, _ y: Double, _ z: Double) -> Double {
     (x * x + y * y + z * z).squareRoot()
-}
-
-private func median(_ values: [Double]) -> Double {
-    guard !values.isEmpty else { return 0 }
-    let sorted = values.sorted()
-    let middle = sorted.count / 2
-    if sorted.count.isMultiple(of: 2) { return (sorted[middle - 1] + sorted[middle]) / 2 }
-    return sorted[middle]
 }
