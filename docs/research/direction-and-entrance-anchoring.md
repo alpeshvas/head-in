@@ -107,3 +107,29 @@ asymmetry** (the literature method), not propagated. Production path: per-step
 PCA-GA with gait-cycle sign resolution (lit. P50 heading error 5.6°) → clean
 ~180° gate → reject reverse/wrong-way before firing. This validates option (a) in
 the decision list above as the right direction.
+
+### Go/no-go follow-up (2026-06-19): per-segment repeatability — NO-GO for a guard with crude sign resolution
+
+To build a wrong-way GATE you need a stable per-segment "expected heading" the
+live value can be compared against. Computed per anchor-segment
+(travelHeading − fieldBearing) for the **two LIS forward passes** — they should
+agree. They don't:
+
+| Segment | fwd p1 | fwd p2 |
+|---|---|---|
+| Cp1→Cp2 | 103° | 98° ✓ |
+| Cp2→Cp3 | −22° | 75° ✗ |
+| Cp4→Cp5 | 49° | −144° ✗ |
+| Cp6→Cp7 | 70° | 175° ✗ |
+| Cp7→Cp8 | −51° | 173° ✗ |
+
+Segments disagree by ~100–170° **between two forward passes of the same route** —
+the crude integrated-velocity sign resolution flips inconsistently (±180°). With
+no stable forward reference, a guard cannot separate "wrong-way" from normal
+pass-to-pass noise. **NO-GO** for a gait-heading wrong-way guard at this effort
+level. A usable guard requires proper per-step **gait-cycle sign resolution**
+(PCA-GA stance-phase, lit. 5.6° P50) — substantial signal processing, and
+cross-pass/pose repeatability still unproven. Decision: do **not** ship a reverse
+guard on the guided-tour branch; the reverse/out-of-order cases remain documented
+out-of-design limitations, and "any-order" support is the free-roam branch's job
+(per-zone matching), not a heading guard.
