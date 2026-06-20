@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>The camera is used only during surveyor ground-truth recording (ARKit) to log a precise walking trajectory. It is never used in the tour experience.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>The microphone is used to record optional audio clips for map checkpoints.</string>
 	<key>NSMotionUsageDescription</key>
 	<string>Step, motion, and barometer data are recorded during route surveys to build indoor positioning fingerprints.</string>
 	<key>UIFileSharingEnabled</key>

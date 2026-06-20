@@ -73,6 +73,8 @@ private struct WindowGroupBody: View {
                     .tabItem { Label("Survey", systemImage: "map") }
                 NavigationStack { LivePositioningView() }
                     .tabItem { Label("Live", systemImage: "location.north.circle") }
+                NavigationStack { MapHeatmapView() }
+                    .tabItem { Label("Map", systemImage: "map") }
                 NavigationStack { SessionsView() }
                     .tabItem { Label("Sessions", systemImage: "tray.full") }
             }

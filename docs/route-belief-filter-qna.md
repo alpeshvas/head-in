@@ -6,7 +6,7 @@ In this codebase, **predict / observe** is the core Bayes-filter loop in:
 
 Think of it as:
 
-> **Predict:** “Given the user moved, where could they be now?”  
+> **Predict:** “Given the user moved, where could they be now?”
 > **Observe:** “Given the sensor readings, which of those guesses look plausible?”
 
 ## 1. State: what the filter tracks

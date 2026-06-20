@@ -29,7 +29,11 @@ targets:
     sources:
       - path: SurveyRecorder/RouteBeliefFilter.swift
       - path: SurveyRecorder/RouteProfile.swift
+      - path: SurveyRecorder/ParticleFilter2D.swift
+      - path: SurveyRecorder/TwoDMapModels.swift
+      - path: SurveyRecorder/TwoDSurveyModels.swift
       - path: Tests/FilterParityTests.swift
+      - path: Tests/ParticleFilter2DTests.swift
       - path: Tests/Fixtures
         buildPhase: resources
     settings:
@@ -50,6 +54,7 @@ targets:
         UILaunchScreen: {}
         NSMotionUsageDescription: Step, motion, and barometer data are recorded during route surveys to build indoor positioning fingerprints.
         NSCameraUsageDescription: The camera is used only during surveyor ground-truth recording (ARKit) to log a precise walking trajectory. It is never used in the tour experience.
+        NSMicrophoneUsageDescription: The microphone is used to record optional audio clips for map checkpoints.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UISupportedInterfaceOrientations:

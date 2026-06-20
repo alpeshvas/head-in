@@ -1,7 +1,15 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SessionsView: View {
     @State private var sessions: [SessionFile] = []
+    @State private var showDeleteAllConfirmation = false
+    @State private var showBundleImporter = false
+    @State private var isExportingBundle = false
+    @State private var exportError: String?
+    @State private var bundleShareURL: ShareableURL?
+    @State private var importSummary: SurveyBundleSummary?
+    @State private var importError: String?
 
     var body: some View {
         List {
@@ -31,8 +39,141 @@ struct SessionsView: View {
             .onDelete(perform: delete)
         }
         .navigationTitle("Sessions")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        exportBundle()
+                    } label: {
+                        Label("Export all as bundle", systemImage: "tray.and.arrow.up")
+                    }
+                    .disabled(sessions.isEmpty && !mapIsImported)
+
+                    Button {
+                        showBundleImporter = true
+                    } label: {
+                        Label("Import bundle…", systemImage: "tray.and.arrow.down")
+                    }
+
+                    Divider()
+
+                    Button(role: .destructive) {
+                        showDeleteAllConfirmation = true
+                    } label: {
+                        Label("Delete all sessions", systemImage: "trash")
+                    }
+                    .disabled(sessions.isEmpty)
+                } label: {
+                    Label("Manage", systemImage: "ellipsis.circle")
+                }
+            }
+        }
+        .confirmationDialog(
+            "Delete all \(sessions.count) session\(sessions.count == 1 ? "" : "s")?",
+            isPresented: $showDeleteAllConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete all", role: .destructive) {
+                deleteAll()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes every recorded survey from the app. Copies exported via the share sheet are unaffected.")
+        }
         .onAppear(perform: reload)
         .refreshable { reload() }
+        .fileImporter(
+            isPresented: $showBundleImporter,
+            allowedContentTypes: [UTType(filenameExtension: "jsonl") ?? UTType.json, UTType.json]
+        ) { result in
+            switch result {
+            case .success(let url):
+                do {
+                    let summary = try SurveyBundle.importBundle(from: url)
+                    importSummary = summary
+                    importError = nil
+                    reload()
+                } catch {
+                    importError = error.localizedDescription
+                }
+            case .failure(let error):
+                importError = error.localizedDescription
+            }
+        }
+        .sheet(item: $bundleShareURL) { wrap in
+            VStack(spacing: 16) {
+                Text("Survey bundle ready")
+                    .font(.headline)
+                Text(wrap.url.lastPathComponent)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                ShareLink(item: wrap.url) {
+                    Label("Share / Save bundle", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                Button("Done") { bundleShareURL = nil }
+                    .buttonStyle(.bordered)
+            }
+            .padding()
+            .presentationDetents([.medium])
+        }
+        .alert("Bundle imported", isPresented: Binding(
+            get: { importSummary != nil },
+            set: { if !$0 { importSummary = nil } }
+        )) {
+            Button("OK", role: .cancel) { importSummary = nil }
+        } message: {
+            Text(importSummary?.description ?? "")
+        }
+        .alert("Could not import bundle", isPresented: Binding(
+            get: { importError != nil },
+            set: { if !$0 { importError = nil } }
+        )) {
+            Button("OK", role: .cancel) { importError = nil }
+        } message: {
+            Text(importError ?? "Unknown error")
+        }
+        .alert("Could not export bundle", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { exportError = nil }
+        } message: {
+            Text(exportError ?? "Unknown error")
+        }
+        .overlay {
+            if isExportingBundle {
+                ProgressView("Building bundle…")
+                    .padding()
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            }
+        }
+    }
+
+    private var mapIsImported: Bool {
+        FileManager.default.fileExists(atPath: VenueMap2DStore.importedMapURL.path)
+    }
+
+    private func exportBundle() {
+        isExportingBundle = true
+        exportError = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let url = try SurveyBundle.exportBundle()
+                DispatchQueue.main.async {
+                    isExportingBundle = false
+                    bundleShareURL = ShareableURL(url: url)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    isExportingBundle = false
+                    exportError = error.localizedDescription
+                }
+            }
+        }
     }
 
     private func reload() {
@@ -50,6 +191,13 @@ struct SessionsView: View {
     private func delete(at offsets: IndexSet) {
         for index in offsets {
             try? FileManager.default.removeItem(at: sessions[index].url)
+        }
+        reload()
+    }
+
+    private func deleteAll() {
+        for session in sessions {
+            try? FileManager.default.removeItem(at: session.url)
         }
         reload()
     }
@@ -72,4 +220,9 @@ struct SessionFile: Identifiable {
     var sizeString: String {
         ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
     }
+}
+
+private struct ShareableURL: Identifiable {
+    let url: URL
+    var id: URL { url }
 }
