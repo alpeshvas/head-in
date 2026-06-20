@@ -34,6 +34,15 @@ struct Entrance2D: Codable, Identifiable, Hashable {
     var point: MapPoint2D
 }
 
+struct Checkpoint2D: Codable, Identifiable, Hashable {
+    var id: String
+    var name: String
+    var message: String
+    var point: MapPoint2D
+    var roomId: String?
+    var audioFileName: String? = nil
+}
+
 struct VenueMap2D: Codable, Hashable {
     var venueId: String
     var name: String
@@ -45,6 +54,62 @@ struct VenueMap2D: Codable, Hashable {
     var rooms: [Room2D]
     var entrances: [Entrance2D]
     var alignmentPoints: [AlignmentPoint2D]
+    var checkpoints: [Checkpoint2D]
+
+    init(
+        venueId: String,
+        name: String,
+        widthMeters: Double,
+        heightMeters: Double,
+        image: VenueMapImage2D?,
+        walkablePolygons: [[MapPoint2D]],
+        walls: [Wall2D],
+        rooms: [Room2D],
+        entrances: [Entrance2D],
+        alignmentPoints: [AlignmentPoint2D],
+        checkpoints: [Checkpoint2D] = []
+    ) {
+        self.venueId = venueId
+        self.name = name
+        self.widthMeters = widthMeters
+        self.heightMeters = heightMeters
+        self.image = image
+        self.walkablePolygons = walkablePolygons
+        self.walls = walls
+        self.rooms = rooms
+        self.entrances = entrances
+        self.alignmentPoints = alignmentPoints
+        self.checkpoints = checkpoints
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case venueId
+        case name
+        case widthMeters
+        case heightMeters
+        case image
+        case walkablePolygons
+        case walls
+        case rooms
+        case entrances
+        case alignmentPoints
+        case checkpoints
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        venueId = try container.decode(String.self, forKey: .venueId)
+        name = try container.decode(String.self, forKey: .name)
+        widthMeters = try container.decode(Double.self, forKey: .widthMeters)
+        heightMeters = try container.decode(Double.self, forKey: .heightMeters)
+        image = try container.decodeIfPresent(VenueMapImage2D.self, forKey: .image)
+        walkablePolygons = try container.decode([[MapPoint2D]].self, forKey: .walkablePolygons)
+        walls = try container.decode([Wall2D].self, forKey: .walls)
+        rooms = try container.decode([Room2D].self, forKey: .rooms)
+        entrances = try container.decode([Entrance2D].self, forKey: .entrances)
+        alignmentPoints = try container.decode([AlignmentPoint2D].self, forKey: .alignmentPoints)
+        checkpoints = try container.decodeIfPresent([Checkpoint2D].self, forKey: .checkpoints) ?? []
+    }
 }
 
 struct VenueMapBundle2D: Codable, Hashable {
@@ -108,6 +173,18 @@ enum VenueMap2DStore {
 
     static var importedMapURL: URL {
         venueMapsDirectory.appendingPathComponent(importedFileName)
+    }
+
+    static var checkpointAudioDirectory: URL {
+        venueMapsDirectory.appendingPathComponent("checkpoint-audio", isDirectory: true)
+    }
+
+    static func checkpointAudioURL(fileName: String) -> URL {
+        checkpointAudioDirectory.appendingPathComponent(fileName)
+    }
+
+    static func removeCheckpointAudio(fileName: String) {
+        try? FileManager.default.removeItem(at: checkpointAudioURL(fileName: fileName))
     }
 
     static func loadSavedOrBundled(resource: String = defaultResource) -> VenueMapBundle2D {

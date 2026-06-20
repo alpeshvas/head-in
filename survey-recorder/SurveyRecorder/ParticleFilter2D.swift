@@ -17,7 +17,7 @@ struct ParticleEstimate2D: Hashable {
 }
 
 enum ParticleFilter2DParams {
-    static let particleCount = 1_500
+    static let particleCount = 1_200
     static let initialRadiusMeters = 1.8
     static let stepLengthMeters = 0.62
     static let stepLengthSigmaMeters = 0.15
@@ -93,6 +93,7 @@ final class ParticleFilter2D {
     private(set) var particles: [Particle2D]
     let map: VenueMap2D
     let heatmapCells: [MagneticHeatmapCell]
+    private let heatmapIndex: HeatmapCellIndex2D
     private var rng: SeededRandomNumberGenerator
     private(set) var lastTurnYawRadians = 0.0
     private(set) var lastTurnRecoveryParticleCount = 0
@@ -100,6 +101,7 @@ final class ParticleFilter2D {
     init(map: VenueMap2D, heatmapCells: [MagneticHeatmapCell], start: MapPoint2D, seed: UInt64 = 0x5eed) {
         self.map = map
         self.heatmapCells = heatmapCells
+        self.heatmapIndex = HeatmapCellIndex2D(cells: heatmapCells)
         rng = SeededRandomNumberGenerator(seed: seed)
         particles = []
         particles.reserveCapacity(ParticleFilter2DParams.particleCount)
@@ -121,6 +123,7 @@ final class ParticleFilter2D {
     init(map: VenueMap2D, heatmapCells: [MagneticHeatmapCell], particles: [Particle2D], seed: UInt64 = 0x5eed) {
         self.map = map
         self.heatmapCells = heatmapCells
+        self.heatmapIndex = HeatmapCellIndex2D(cells: heatmapCells)
         self.rng = SeededRandomNumberGenerator(seed: seed)
         self.particles = particles
         normalize()
@@ -425,9 +428,7 @@ final class ParticleFilter2D {
     }
 
     private func nearestCell(to point: MapPoint2D) -> MagneticHeatmapCell? {
-        heatmapCells.min { a, b in
-            distanceSquared(a.center, point) < distanceSquared(b.center, point)
-        }
+        heatmapIndex.nearestCell(to: point)
     }
 
     private func magneticSigma(for cellStddev: Double?, floor: Double) -> Double {
@@ -498,5 +499,107 @@ private struct SeededRandomNumberGenerator: RandomNumberGenerator {
         let u1 = max(nextUnit(), 1e-12)
         let u2 = nextUnit()
         return mean + sigma * sqrt(-2 * log(u1)) * cos(2 * Double.pi * u2)
+    }
+}
+
+private struct HeatmapCellIndex2D {
+    private struct Key: Hashable {
+        let x: Int
+        let y: Int
+    }
+
+    private let cells: [MagneticHeatmapCell]
+    private let buckets: [Key: [Int]]
+    private let bucketSize: Double
+    private let maxSearchRing: Int
+
+    init(cells: [MagneticHeatmapCell]) {
+        self.cells = cells
+        let medianCellSize = Self.median(cells.map(\.cellSizeMeters).filter { $0.isFinite && $0 > 0 })
+        bucketSize = max(0.5, medianCellSize)
+
+        var buckets: [Key: [Int]] = [:]
+        var minX = Double.infinity, maxX = -Double.infinity
+        var minY = Double.infinity, maxY = -Double.infinity
+        for (index, cell) in cells.enumerated() {
+            buckets[Self.key(for: cell.center, bucketSize: bucketSize), default: []].append(index)
+            minX = min(minX, cell.center.x)
+            maxX = max(maxX, cell.center.x)
+            minY = min(minY, cell.center.y)
+            maxY = max(maxY, cell.center.y)
+        }
+        self.buckets = buckets
+        if cells.isEmpty {
+            maxSearchRing = 0
+        } else {
+            let span = max(maxX - minX, maxY - minY)
+            maxSearchRing = max(1, Int((span / bucketSize).rounded(.up)) + 2)
+        }
+    }
+
+    func nearestCell(to point: MapPoint2D) -> MagneticHeatmapCell? {
+        guard !cells.isEmpty else { return nil }
+        let center = Self.key(for: point, bucketSize: bucketSize)
+        var bestIndex: Int?
+        var bestDistanceSquared = Double.infinity
+
+        for ring in 0...maxSearchRing {
+            visitRing(center: center, ring: ring) { key in
+                guard let indexes = buckets[key] else { return }
+                for index in indexes {
+                    let d = Self.distanceSquared(cells[index].center, point)
+                    if d < bestDistanceSquared {
+                        bestDistanceSquared = d
+                        bestIndex = index
+                    }
+                }
+            }
+
+            let unvisitedBoundaryMeters = max(0, Double(ring) - 0.5) * bucketSize
+            if bestIndex != nil, bestDistanceSquared <= unvisitedBoundaryMeters * unvisitedBoundaryMeters {
+                break
+            }
+        }
+
+        guard let bestIndex else { return nil }
+        return cells[bestIndex]
+    }
+
+    private func visitRing(center: Key, ring: Int, _ visit: (Key) -> Void) {
+        if ring == 0 {
+            visit(center)
+            return
+        }
+        for dx in -ring...ring {
+            visit(Key(x: center.x + dx, y: center.y - ring))
+            visit(Key(x: center.x + dx, y: center.y + ring))
+        }
+        guard ring > 1 else {
+            visit(Key(x: center.x - ring, y: center.y))
+            visit(Key(x: center.x + ring, y: center.y))
+            return
+        }
+        for dy in (-(ring - 1))...(ring - 1) {
+            visit(Key(x: center.x - ring, y: center.y + dy))
+            visit(Key(x: center.x + ring, y: center.y + dy))
+        }
+    }
+
+    private static func key(for point: MapPoint2D, bucketSize: Double) -> Key {
+        Key(x: Int(floor(point.x / bucketSize)), y: Int(floor(point.y / bucketSize)))
+    }
+
+    private static func distanceSquared(_ a: MapPoint2D, _ b: MapPoint2D) -> Double {
+        let dx = a.x - b.x
+        let dy = a.y - b.y
+        return dx * dx + dy * dy
+    }
+
+    private static func median(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 1.0 }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) { return (sorted[middle - 1] + sorted[middle]) / 2 }
+        return sorted[middle]
     }
 }

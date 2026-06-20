@@ -30,6 +30,8 @@ final class TwoDRuntimeController {
     private(set) var applePedometerSteps = 0
     private(set) var stepCountDifference = 0
     private(set) var rejectedStepCandidateCount = 0
+    private(set) var activeCheckpoint: Checkpoint2D?
+    private(set) var activeCheckpointDistanceMeters: Double?
 
     @ObservationIgnored private let sensorRecorder = SensorRecorder()
     @ObservationIgnored private var stepDetector = StepDetector2D()
@@ -43,6 +45,10 @@ final class TwoDRuntimeController {
     @ObservationIgnored private var recentStepIntervals: [Double] = []
     @ObservationIgnored private var lastStepTimestamp: TimeInterval?
     @ObservationIgnored private let debugWriter: TwoDRuntimeDebugWriter?
+    @ObservationIgnored private var activeCheckpointLastSeenTime: TimeInterval?
+
+    private let checkpointTriggerRadiusMeters = 3.0
+    private let checkpointHoldSeconds = 3.0
 
     init(
         map: VenueMap2D,
@@ -86,6 +92,9 @@ final class TwoDRuntimeController {
         applePedometerSteps = 0
         stepCountDifference = 0
         rejectedStepCandidateCount = 0
+        activeCheckpoint = nil
+        activeCheckpointDistanceMeters = nil
+        activeCheckpointLastSeenTime = nil
         pendingYawDelta = 0
         previousMotionTimestamp = nil
         latestStepFeature = nil
@@ -96,6 +105,9 @@ final class TwoDRuntimeController {
         lastStepTimestamp = nil
         stepDetector.reset()
         if let filter { updateRuntimeDiagnostics(filter: filter) }
+        if let estimate {
+            updateCheckpointState(estimate: estimate, timestamp: ProcessInfo.processInfo.systemUptime)
+        }
         if let filter, let estimate {
             debugWriter?.writeFilter(
                 timestamp: ProcessInfo.processInfo.systemUptime,
@@ -290,14 +302,46 @@ final class TwoDRuntimeController {
 
     private func updateStatus() {
         guard let estimate else { return }
+        updateCheckpointState(estimate: estimate, timestamp: previousMotionTimestamp ?? ProcessInfo.processInfo.systemUptime)
         let room = estimate.roomId.flatMap { id in map.rooms.first { $0.id == id }?.name } ?? "unknown room"
+        let checkpointPrefix = activeCheckpoint.map { "Near \($0.name) · " } ?? ""
         if estimate.confidenceRadiusMeters <= 2.5 {
-            statusText = "High confidence · \(room)"
+            statusText = "\(checkpointPrefix)High confidence · \(room)"
         } else if estimate.confidenceRadiusMeters <= 5.0 {
-            statusText = "Medium confidence · \(room)"
+            statusText = "\(checkpointPrefix)Medium confidence · \(room)"
         } else {
-            statusText = "Locating · \(room)"
+            statusText = "\(checkpointPrefix)Locating · \(room)"
         }
+    }
+
+    private func updateCheckpointState(estimate: ParticleEstimate2D, timestamp: TimeInterval) {
+        guard !map.checkpoints.isEmpty else {
+            activeCheckpoint = nil
+            activeCheckpointDistanceMeters = nil
+            activeCheckpointLastSeenTime = nil
+            return
+        }
+        let nearest = map.checkpoints
+            .map { checkpoint in
+                (checkpoint, hypot(checkpoint.point.x - estimate.point.x, checkpoint.point.y - estimate.point.y))
+            }
+            .min { $0.1 < $1.1 }
+        if let nearest, nearest.1 <= checkpointTriggerRadiusMeters {
+            activeCheckpoint = nearest.0
+            activeCheckpointDistanceMeters = nearest.1
+            activeCheckpointLastSeenTime = timestamp
+            return
+        }
+
+        if let lastSeen = activeCheckpointLastSeenTime,
+           timestamp - lastSeen < checkpointHoldSeconds {
+            activeCheckpointDistanceMeters = nearest?.1
+            return
+        }
+
+        activeCheckpoint = nil
+        activeCheckpointDistanceMeters = nil
+        activeCheckpointLastSeenTime = nil
     }
 }
 

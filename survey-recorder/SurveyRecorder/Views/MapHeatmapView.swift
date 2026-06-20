@@ -21,6 +21,14 @@ struct MapHeatmapView: View {
     @State private var saveNote: String?
     @State private var confirmClear = false
     @State private var observationMode = ParticleObservationMode2D.absolute
+    @State private var isAddingCheckpoint = false
+    @State private var selectedCheckpointID: String?
+    @State private var checkpointName = ""
+    @State private var checkpointMessage = ""
+    @State private var audioRecorder = CheckpointAudioRecorder()
+    @State private var audioPlayer = CheckpointAudioPlayer()
+    @State private var recordingCheckpointID: String?
+    @State private var audioError: String?
 
     private enum ImportKind { case mapJSON, image }
     @State private var surveyController: TwoDSurveyController?
@@ -54,9 +62,12 @@ struct MapHeatmapView: View {
                     map: map,
                     cells: cells,
                     mode: mode,
+                    checkpoints: map.checkpoints,
+                    activeCheckpointID: selectedCheckpointID,
                     currentPoint: debugController?.latestTruthMapPoint ?? surveyController?.latestMapPoint,
                     runtimeEstimate: debugController?.runtimeEstimate ?? runtimeController?.estimate,
-                    runtimeParticles: debugController?.runtimeParticles ?? runtimeController?.particleSnapshot ?? []
+                    runtimeParticles: debugController?.runtimeParticles ?? runtimeController?.particleSnapshot ?? [],
+                    onMapTap: handleCheckpointMapTap
                 )
                     .frame(height: 480)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -66,6 +77,7 @@ struct MapHeatmapView: View {
                     )
 
                 surveyCard
+                checkpointCard
                 runtimeCard
                 debugRuntimeCard
                 legendCard
@@ -141,6 +153,19 @@ struct MapHeatmapView: View {
         } message: {
             Text(importError ?? "Unknown error")
         }
+        .alert("Checkpoint audio unavailable", isPresented: Binding(
+            get: { audioError != nil },
+            set: { if !$0 { audioError = nil } }
+        )) {
+            Button("OK", role: .cancel) { audioError = nil }
+        } message: {
+            Text(audioError ?? "Unknown error")
+        }
+    }
+
+    private var selectedCheckpoint: Checkpoint2D? {
+        guard let selectedCheckpointID else { return nil }
+        return map.checkpoints.first { $0.id == selectedCheckpointID }
     }
 
     private var headerCard: some View {
@@ -254,6 +279,119 @@ struct MapHeatmapView: View {
                     .buttonStyle(.bordered)
                     .disabled(!controller.isRunning || controller.nextAlignmentPoint == nil)
                 }
+            }
+        }
+    }
+
+    private var checkpointCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Checkpoints")
+                            .font(.headline)
+                        Text(isAddingCheckpoint ? "Tap the map to place the next checkpoint." : "Tap Add, then tap the map. Tap an existing checkpoint to edit it.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(isAddingCheckpoint ? "Cancel" : "Add") {
+                        isAddingCheckpoint.toggle()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                if map.checkpoints.isEmpty {
+                    Text("No checkpoints yet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 8)], alignment: .leading, spacing: 8) {
+                        ForEach(map.checkpoints) { checkpoint in
+                            Button {
+                                selectCheckpoint(checkpoint)
+                                isAddingCheckpoint = false
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(checkpoint.name)
+                                        .font(.caption.weight(.semibold))
+                                        .lineLimit(1)
+                                    Text(String(format: "%.1f, %.1f", checkpoint.point.x, checkpoint.point.y))
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(
+                                    checkpoint.id == selectedCheckpointID ? Color.accentColor.opacity(0.16) : Color(.tertiarySystemFill),
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                if selectedCheckpointID != nil {
+                    Divider()
+                    TextField("Name", text: $checkpointName)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                    TextField("Message", text: $checkpointMessage, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(2...5)
+                    if let selectedCheckpoint {
+                        checkpointAudioControls(for: selectedCheckpoint)
+                    }
+                    HStack {
+                        Button("Save") { saveSelectedCheckpoint() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(checkpointName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Delete", role: .destructive) { deleteSelectedCheckpoint() }
+                            .buttonStyle(.bordered)
+                        Spacer()
+                    }
+                }
+            }
+        }
+    }
+
+    private func checkpointAudioControls(for checkpoint: Checkpoint2D) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Checkpoint audio")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button(audioRecorder.isRecording && recordingCheckpointID == checkpoint.id ? "Stop recording" : "Record audio") {
+                    toggleCheckpointAudioRecording(for: checkpoint)
+                }
+                .buttonStyle(.bordered)
+                .disabled(audioRecorder.isRecording && recordingCheckpointID != checkpoint.id)
+
+                Button("Play") {
+                    playCheckpointAudio(checkpoint)
+                }
+                .buttonStyle(.bordered)
+                .disabled(checkpoint.audioFileName == nil)
+
+                Button("Delete audio", role: .destructive) {
+                    deleteCheckpointAudio(checkpoint)
+                }
+                .buttonStyle(.bordered)
+                .disabled(checkpoint.audioFileName == nil || audioRecorder.isRecording)
+            }
+            if audioRecorder.isRecording && recordingCheckpointID == checkpoint.id {
+                Label("Recording... tap Stop recording when done.", systemImage: "waveform")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.red)
+            } else if checkpoint.audioFileName != nil {
+                Label("Audio clip saved for this checkpoint.", systemImage: "speaker.wave.2.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Optional. Live will play this when the visitor enters the checkpoint radius.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -521,6 +659,138 @@ struct MapHeatmapView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private func handleCheckpointMapTap(_ point: MapPoint2D) {
+        guard point.x >= 0, point.y >= 0, point.x <= map.widthMeters, point.y <= map.heightMeters else { return }
+
+        if let existing = nearestCheckpoint(to: point, withinMeters: 0.9) {
+            selectCheckpoint(existing)
+            isAddingCheckpoint = false
+            return
+        }
+
+        guard isAddingCheckpoint else { return }
+        guard Geometry2D.isWalkable(point, in: map) else {
+            saveNote = "Checkpoint must be inside the walkable map."
+            return
+        }
+
+        let checkpoint = Checkpoint2D(
+            id: UUID().uuidString,
+            name: "Checkpoint \(map.checkpoints.count + 1)",
+            message: "",
+            point: point,
+            roomId: Geometry2D.roomId(containing: point, in: map)
+        )
+        var updated = bundle
+        updated.map.checkpoints.append(checkpoint)
+        saveCheckpointBundle(updated, note: "Added \(checkpoint.name).")
+        selectCheckpoint(checkpoint)
+        isAddingCheckpoint = false
+    }
+
+    private func nearestCheckpoint(to point: MapPoint2D, withinMeters maxDistance: Double) -> Checkpoint2D? {
+        map.checkpoints
+            .map { checkpoint in
+                (checkpoint, hypot(checkpoint.point.x - point.x, checkpoint.point.y - point.y))
+            }
+            .filter { $0.1 <= maxDistance }
+            .min { $0.1 < $1.1 }?
+            .0
+    }
+
+    private func selectCheckpoint(_ checkpoint: Checkpoint2D) {
+        selectedCheckpointID = checkpoint.id
+        checkpointName = checkpoint.name
+        checkpointMessage = checkpoint.message
+    }
+
+    private func saveSelectedCheckpoint() {
+        guard let selectedCheckpointID,
+              let index = map.checkpoints.firstIndex(where: { $0.id == selectedCheckpointID }) else { return }
+        let trimmedName = checkpointName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+
+        var updated = bundle
+        updated.map.checkpoints[index].name = trimmedName
+        updated.map.checkpoints[index].message = checkpointMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        saveCheckpointBundle(updated, note: "Saved \(trimmedName).")
+    }
+
+    private func deleteSelectedCheckpoint() {
+        guard let id = selectedCheckpointID else { return }
+        var updated = bundle
+        if recordingCheckpointID == id { stopCheckpointAudioRecording() }
+        if let fileName = updated.map.checkpoints.first(where: { $0.id == id })?.audioFileName {
+            VenueMap2DStore.removeCheckpointAudio(fileName: fileName)
+        }
+        updated.map.checkpoints.removeAll { $0.id == id }
+        self.selectedCheckpointID = nil
+        checkpointName = ""
+        checkpointMessage = ""
+        saveCheckpointBundle(updated, note: "Deleted checkpoint.")
+    }
+
+    private func toggleCheckpointAudioRecording(for checkpoint: Checkpoint2D) {
+        if audioRecorder.isRecording && recordingCheckpointID == checkpoint.id {
+            stopCheckpointAudioRecording()
+            saveNote = "Saved audio for \(checkpoint.name)."
+            return
+        }
+
+        let fileName = checkpoint.audioFileName ?? "checkpoint-\(checkpoint.id).m4a"
+        Task {
+            do {
+                try await audioRecorder.startRecording(fileName: fileName)
+                recordingCheckpointID = checkpoint.id
+                if checkpoint.audioFileName == nil,
+                   let index = map.checkpoints.firstIndex(where: { $0.id == checkpoint.id }) {
+                    var updated = bundle
+                    updated.map.checkpoints[index].audioFileName = fileName
+                    saveCheckpointBundle(updated, note: "Recording audio for \(checkpoint.name).")
+                } else {
+                    saveNote = "Recording audio for \(checkpoint.name)."
+                }
+            } catch {
+                recordingCheckpointID = nil
+                audioError = error.localizedDescription
+            }
+        }
+    }
+
+    private func stopCheckpointAudioRecording() {
+        audioRecorder.stopRecording()
+        recordingCheckpointID = nil
+    }
+
+    private func playCheckpointAudio(_ checkpoint: Checkpoint2D) {
+        guard let fileName = checkpoint.audioFileName else { return }
+        do {
+            try audioPlayer.play(fileName: fileName)
+        } catch {
+            audioError = error.localizedDescription
+        }
+    }
+
+    private func deleteCheckpointAudio(_ checkpoint: Checkpoint2D) {
+        guard let fileName = checkpoint.audioFileName,
+              let index = map.checkpoints.firstIndex(where: { $0.id == checkpoint.id }) else { return }
+        VenueMap2DStore.removeCheckpointAudio(fileName: fileName)
+        var updated = bundle
+        updated.map.checkpoints[index].audioFileName = nil
+        saveCheckpointBundle(updated, note: "Deleted audio for \(checkpoint.name).")
+    }
+
+    private func saveCheckpointBundle(_ updated: VenueMapBundle2D, note: String) {
+        do {
+            try VenueMap2DStore.save(updated)
+            bundle = updated
+            saveNote = note
+            importError = nil
+        } catch {
+            importError = "Could not save checkpoints: \(error.localizedDescription)"
+        }
+    }
+
     private func imagePixelSize(at url: URL) -> CGSize? {
         #if canImport(UIKit)
         guard let image = UIImage(contentsOfFile: url.path) else { return nil }
@@ -538,9 +808,12 @@ struct FloorPlanHeatmapCanvas: View {
     let map: VenueMap2D
     let cells: [MagneticHeatmapCell]
     let mode: HeatmapMode2D
+    var checkpoints: [Checkpoint2D] = []
+    var activeCheckpointID: String? = nil
     var currentPoint: MapPoint2D? = nil
     var runtimeEstimate: ParticleEstimate2D? = nil
     var runtimeParticles: [MapPoint2D] = []
+    var onMapTap: ((MapPoint2D) -> Void)? = nil
 
     // Live pan/zoom so dense venues aren't crammed into the fit-to-frame view.
     @State private var committedZoom: CGFloat = 1
@@ -561,14 +834,21 @@ struct FloorPlanHeatmapCanvas: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let transform = MapTransform(map: map, size: proxy.size, zoom: liveZoom, pan: liveOffset)
+            let contentBounds = MapContentBounds.bounds(
+                map: map,
+                cells: cells,
+                checkpoints: checkpoints,
+                extraPoints: [currentPoint, runtimeEstimate?.point].compactMap { $0 }
+            )
+            let transform = MapTransform(map: map, bounds: contentBounds, size: proxy.size, zoom: liveZoom, pan: liveOffset)
             ZStack(alignment: .topLeading) {
                 if let image = floorPlanImage {
+                    let imageOrigin = transform.point(MapPoint2D(x: 0, y: 0))
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: map.widthMeters * transform.scale, height: map.heightMeters * transform.scale)
-                        .offset(x: transform.xOffset, y: transform.yOffset)
+                        .offset(x: imageOrigin.x, y: imageOrigin.y)
                         .opacity(0.72)
                 }
                 Canvas { context, size in
@@ -579,6 +859,7 @@ struct FloorPlanHeatmapCanvas: View {
                     drawWalls(in: &context, transform: transform)
                     drawEntrances(in: &context, transform: transform, zoom: liveZoom)
                     drawAlignmentPoints(in: &context, transform: transform, zoom: liveZoom)
+                    drawCheckpoints(in: &context, transform: transform, zoom: liveZoom)
                     drawRuntimeParticles(in: &context, transform: transform)
                     drawRuntimeEstimate(in: &context, transform: transform)
                     drawCurrentPoint(in: &context, transform: transform)
@@ -609,6 +890,12 @@ struct FloorPlanHeatmapCanvas: View {
                         guard committedZoom > Self.minZoom else { return }
                         committedPan.width += value.translation.width
                         committedPan.height += value.translation.height
+                    }
+            )
+            .simultaneousGesture(
+                SpatialTapGesture()
+                    .onEnded { value in
+                        onMapTap?(transform.mapPoint(value.location))
                     }
             )
             .onTapGesture(count: 2) {
@@ -744,6 +1031,7 @@ struct FloorPlanHeatmapCanvas: View {
     // only, so a dense venue doesn't pile every name on top of each other at 1x.
     private static let roomLabelZoom: CGFloat = 1.8
     private static let pointLabelZoom: CGFloat = 2.2
+    private static let checkpointLabelZoom: CGFloat = 1.4
 
     private func chip(_ text: Text, at point: CGPoint, in context: inout GraphicsContext) {
         let resolved = context.resolve(text)
@@ -812,6 +1100,26 @@ struct FloorPlanHeatmapCanvas: View {
         }
     }
 
+    private func drawCheckpoints(in context: inout GraphicsContext, transform: MapTransform, zoom: CGFloat) {
+        for (index, checkpoint) in checkpoints.enumerated() {
+            let p = transform.point(checkpoint.point)
+            let active = checkpoint.id == activeCheckpointID
+            let fill = active ? Color.orange : Color.pink
+            let radius = active ? 8.0 : 6.0
+            let marker = CGRect(x: p.x - radius, y: p.y - radius, width: 2 * radius, height: 2 * radius)
+            context.fill(Path(ellipseIn: marker), with: .color(fill))
+            context.stroke(Path(ellipseIn: marker.insetBy(dx: -2, dy: -2)), with: .color(.white), lineWidth: active ? 2.4 : 1.6)
+
+            let number = context.resolve(Text("\(index + 1)").font(.caption2.bold()).foregroundStyle(.white))
+            context.draw(number, at: p, anchor: .center)
+
+            if zoom >= Self.checkpointLabelZoom || active {
+                let label = context.resolve(Text(checkpoint.name).font(.caption2.weight(.semibold)).foregroundStyle(fill))
+                context.draw(label, at: CGPoint(x: p.x + 11, y: p.y), anchor: .leading)
+            }
+        }
+    }
+
     private func drawCurrentPoint(in context: inout GraphicsContext, transform: MapTransform) {
         guard let currentPoint else { return }
         let p = transform.point(currentPoint)
@@ -873,29 +1181,78 @@ struct FloorPlanHeatmapCanvas: View {
 
 private struct MapTransform {
     let map: VenueMap2D
+    let bounds: MapBounds2D
     let scale: Double
     let xOffset: Double
     let yOffset: Double
 
-    init(map: VenueMap2D, size: CGSize, zoom: CGFloat = 1, pan: CGSize = .zero) {
+    init(map: VenueMap2D, bounds: MapBounds2D, size: CGSize, zoom: CGFloat = 1, pan: CGSize = .zero) {
         self.map = map
-        let sx = size.width / max(map.widthMeters, 1)
-        let sy = size.height / max(map.heightMeters, 1)
+        self.bounds = bounds
+        let sx = size.width / max(bounds.width, 1)
+        let sy = size.height / max(bounds.height, 1)
         // Fold zoom into the scale so geometry is drawn natively (crisp text/markers
         // at constant screen size), instead of rasterizing then magnifying.
         scale = min(sx, sy) * Double(zoom)
-        xOffset = (size.width - map.widthMeters * scale) / 2 + Double(pan.width)
-        yOffset = (size.height - map.heightMeters * scale) / 2 + Double(pan.height)
+        xOffset = (size.width - bounds.width * scale) / 2 + Double(pan.width)
+        yOffset = (size.height - bounds.height * scale) / 2 + Double(pan.height)
     }
 
     func point(_ p: MapPoint2D) -> CGPoint {
-        CGPoint(x: xOffset + p.x * scale, y: yOffset + p.y * scale)
+        CGPoint(x: xOffset + (p.x - bounds.minX) * scale, y: yOffset + (p.y - bounds.minY) * scale)
+    }
+
+    func mapPoint(_ p: CGPoint) -> MapPoint2D {
+        MapPoint2D(x: bounds.minX + (p.x - xOffset) / scale, y: bounds.minY + (p.y - yOffset) / scale)
     }
 
     func rect(center: MapPoint2D, meters: Double) -> CGRect {
         let side = meters * scale
         let p = point(center)
         return CGRect(x: p.x - side / 2, y: p.y - side / 2, width: side, height: side).insetBy(dx: 0.5, dy: 0.5)
+    }
+}
+
+struct MapBounds2D: Hashable {
+    var minX: Double
+    var minY: Double
+    var maxX: Double
+    var maxY: Double
+
+    var width: Double { max(0.1, maxX - minX) }
+    var height: Double { max(0.1, maxY - minY) }
+}
+
+enum MapContentBounds {
+    static func bounds(
+        map: VenueMap2D,
+        cells: [MagneticHeatmapCell],
+        checkpoints: [Checkpoint2D],
+        extraPoints: [MapPoint2D] = [],
+        paddingMeters: Double = 2.0
+    ) -> MapBounds2D {
+        var points: [MapPoint2D] = []
+        points.append(contentsOf: map.walkablePolygons.flatMap { $0 })
+        points.append(contentsOf: map.rooms.flatMap(\.polygon))
+        points.append(contentsOf: cells.map(\.center))
+        points.append(contentsOf: map.entrances.map(\.point))
+        points.append(contentsOf: map.alignmentPoints.map(\.point))
+        points.append(contentsOf: checkpoints.map(\.point))
+        points.append(contentsOf: extraPoints)
+
+        guard let minX = points.map(\.x).min(),
+              let maxX = points.map(\.x).max(),
+              let minY = points.map(\.y).min(),
+              let maxY = points.map(\.y).max() else {
+            return MapBounds2D(minX: 0, minY: 0, maxX: map.widthMeters, maxY: map.heightMeters)
+        }
+
+        return MapBounds2D(
+            minX: max(0, minX - paddingMeters),
+            minY: max(0, minY - paddingMeters),
+            maxX: min(map.widthMeters, maxX + paddingMeters),
+            maxY: min(map.heightMeters, maxY + paddingMeters)
+        )
     }
 }
 
